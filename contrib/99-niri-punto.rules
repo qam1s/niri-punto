@@ -1,0 +1,6 @@
+# niri-punto: grant the active session user read access to input devices.
+# Installed by `niri-punto setup` (escalated step) or by hand:
+#   sudo install -m 644 contrib/99-niri-punto.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules && sudo udevadm trigger
+# uaccess drops with the session: no `input` group, no relogin.
+KERNEL=="event*", SUBSYSTEM=="input", TAG+="uaccess"

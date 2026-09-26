@@ -1,0 +1,11 @@
+[Unit]
+Description=niri-punto layout correction daemon
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/niri-punto
+Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target
