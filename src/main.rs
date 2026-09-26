@@ -174,7 +174,10 @@ fn main() {
     // The bare invocation still starts the daemon.
     let (command, rest) = match raw.first().map(String::as_str) {
         None | Some("--input-dir") | Some("--config") => ("run", raw.as_slice()),
-        Some("run") | Some("convert-word") | Some("convert-selection") | Some("setup")
+        Some("run")
+        | Some("convert-word")
+        | Some("convert-selection")
+        | Some("setup")
         | Some("doctor") => (raw[0].as_str(), &raw[1..]),
         _ => usage(),
     };
@@ -324,8 +327,8 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     let start = Instant::now();
     let mut triggers = TriggerMachine::new();
     let mut buffer = InputBuffer::default();
-    let mut converter = Converter::new(pair);
-    let mut selection_converter = SelectionConverter::new(pair.clone());
+    let mut converter = Converter::new(pair.clone());
+    let mut selection_converter = SelectionConverter::new(pair);
 
     loop {
         match reader.poll(&input_dir, CONTROL_POLL) {

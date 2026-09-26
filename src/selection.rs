@@ -151,7 +151,10 @@ mod tests {
 
     #[test]
     fn empty_selection_is_refused() {
-        assert_eq!(plan_selection("", 0, 2, &pair()), Err(ConversionError::Empty));
+        assert_eq!(
+            plan_selection("", 0, 2, &pair()),
+            Err(ConversionError::Empty)
+        );
     }
 
     #[test]
