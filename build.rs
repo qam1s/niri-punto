@@ -16,8 +16,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=NIRI_PUNTO_XKB_LAYOUTS");
     let layouts = env::var("NIRI_PUNTO_XKB_LAYOUTS").unwrap_or_else(|_| "us,ru".to_string());
-    let baked = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"))
-        .join("xkb_keymap.xkb");
+    let baked =
+        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo")).join("xkb_keymap.xkb");
     let text = Command::new("xkbcli")
         .args([
             "compile-keymap",

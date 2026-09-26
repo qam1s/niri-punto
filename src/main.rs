@@ -349,7 +349,9 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
         Ok(ipc) => ipc,
         Err(error) => {
             eprintln!("niri IPC unavailable ($NIRI_SOCKET): {error}");
-            eprintln!("hint: retries ran out; the systemd unit restarts the daemon as a last resort");
+            eprintln!(
+                "hint: retries ran out; the systemd unit restarts the daemon as a last resort"
+            );
             let _ = std::fs::remove_file(&socket_path);
             std::process::exit(1);
         }
@@ -366,7 +368,10 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     let mut converter = Converter::new(pair.clone());
     let mut selection_converter = SelectionConverter::new(pair);
     let detector = ManualOnly;
-    eprintln!("detector: {} (manual-only, no auto conversion)", detector.name());
+    eprintln!(
+        "detector: {} (manual-only, no auto conversion)",
+        detector.name()
+    );
 
     loop {
         match reader.poll(&input_dir, CONTROL_POLL) {

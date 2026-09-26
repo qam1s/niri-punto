@@ -287,9 +287,7 @@ fn report_correspondence(pair: &LayoutPair, names: &[String], current: u8) {
     }
     let findings = check_layouts(pair, names, current);
     if findings.is_empty() {
-        println!(
-            "  layouts: count and active index sit inside the pair (order is positional)"
-        );
+        println!("  layouts: count and active index sit inside the pair (order is positional)");
     }
     for finding in findings {
         println!("  note: {finding}");

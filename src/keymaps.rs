@@ -134,7 +134,9 @@ pub fn convert(text: &str, from_ru: bool) -> String {
 /// Same as [`convert`] but over an explicit table (for tests and callers
 /// holding a parsed keymap).
 fn convert_in(pairs: &[(char, char)], text: &str, from_ru: bool) -> String {
-    text.chars().map(|ch| map_char_in(pairs, ch, from_ru)).collect()
+    text.chars()
+        .map(|ch| map_char_in(pairs, ch, from_ru))
+        .collect()
 }
 
 /// The active table: the xkbcli-generated pairs when the build baked a
