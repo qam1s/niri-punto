@@ -21,6 +21,7 @@ mod clipboard;
 mod config;
 mod control;
 mod convert;
+mod detector;
 mod doctor;
 mod inject;
 mod ipc;
@@ -34,6 +35,7 @@ mod undo;
 use buffer::{BufferEntry, InputBuffer};
 use control::{ControlKind, ControlRequest};
 use convert::{ConversionPlan, Converter};
+use detector::{Detector, ManualOnly};
 use inject::Injector;
 use ipc::IpcClient;
 use reader::Reader;
@@ -330,6 +332,8 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new(pair.clone());
     let mut selection_converter = SelectionConverter::new(pair);
+    let detector = ManualOnly;
+    eprintln!("detector: {} (manual-only, no auto conversion)", detector.name());
 
     loop {
         match reader.poll(&input_dir, CONTROL_POLL) {
@@ -345,6 +349,7 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
                     buffer: &mut buffer,
                     converter: &mut converter,
                     selection_converter: &mut selection_converter,
+                    detector: &detector,
                     ipc: &mut ipc,
                     injector: &mut injector,
                 };
@@ -384,12 +389,16 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
 }
 
 /// Mutable daemon state threaded through key handling (keeps `handle_key`
-/// within the argument-count lint).
+/// within the argument-count lint). The detector rides along so the future
+/// scorer slots into the gesture path without touching buffer, triggers, or
+/// injection (ADR-0006); `ManualOnly` always declines, so behavior is
+/// unchanged.
 struct Daemon<'a> {
     triggers: &'a mut TriggerMachine,
     buffer: &'a mut InputBuffer,
     converter: &'a mut Converter,
     selection_converter: &'a mut SelectionConverter,
+    detector: &'a dyn Detector,
     ipc: &'a mut IpcClient,
     injector: &'a mut Injector,
 }
@@ -400,6 +409,7 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
         buffer,
         converter,
         selection_converter,
+        detector,
         ipc,
         injector,
     } = daemon;
@@ -435,6 +445,10 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
     let Some(gesture) = triggers.key(key, pressed, now_ms) else {
         return;
     };
+    // Detector seam (ADR-0006): the future scorer observes the buffer here,
+    // at the gesture decision point. ManualOnly always declines, so the
+    // result is intentionally unused and behavior stays manual-only.
+    let _auto_score = detector.score(buffer.phrase());
     match gesture.kind {
         GestureKind::Word => {
             if gesture.undo && converter.has_pending_undo() {
