@@ -72,7 +72,13 @@ fn write_with(binary: &str, args: &[&str], text: &str) -> io::Result<()> {
         })?;
     if let Some(stdin) = child.stdin.take() {
         let mut stdin = stdin;
-        stdin.write_all(text.as_bytes())?;
+        // The child may exit before reading (e.g. immediate failure):
+        // swallow the pipe error here, the exit status below reports it.
+        match stdin.write_all(text.as_bytes()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}
+            Err(error) => return Err(error),
+        }
     }
     let output = child.wait_with_output()?;
     if !output.status.success() {
