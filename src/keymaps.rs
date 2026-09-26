@@ -123,10 +123,6 @@ fn map_char_in(pairs: &[(char, char)], ch: char, from_ru: bool) -> char {
     }
 }
 
-fn map_char(ch: char, from_ru: bool) -> char {
-    map_char_in(active_pairs(), ch, from_ru)
-}
-
 /// Map `text` char-by-char to the other layout of the active table.
 /// `from_ru == false` converts EN->RU, `from_ru == true` RU->EN.
 /// Unmapped characters (digits, emoji, third-language text, whitespace) pass
@@ -376,12 +372,12 @@ mod tests {
     fn every_pair_round_trips_both_ways() {
         for (en, ru) in PAIRS {
             assert_eq!(
-                map_char(map_char(*en, false), true),
+                map_char_in(PAIRS, map_char_in(PAIRS, *en, false), true),
                 *en,
                 "en {en} did not round-trip"
             );
             assert_eq!(
-                map_char(map_char(*ru, true), false),
+                map_char_in(PAIRS, map_char_in(PAIRS, *ru, true), false),
                 *ru,
                 "ru {ru} did not round-trip"
             );
