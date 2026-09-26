@@ -3,14 +3,21 @@
 //! Ticket 08 (word conversion): read real key presses, and on Double Shift
 //! erase the last word via uinput, switch the layout by explicit index over
 //! niri IPC, wait for the layout-changed event, then replay the same
-//! scancodes. Repeating the gesture undoes the conversion. Phrase and
-//! selection gestures are recognized but wired by later tickets.
+//! scancodes. Repeating the gesture undoes the conversion.
+//! Ticket 09 (selection): on Ctrl+DoubleShift read the primary selection via
+//! `wl-paste`, map it char-by-char to the other layout, publish it with
+//! `wl-copy`, switch the layout by index, wait for the layout-changed event,
+//! then paste over the selection with Ctrl+V. Repeating the gesture undoes.
+//! The phrase gesture is recognized but wired by ticket 10.
 
 mod buffer;
+mod clipboard;
 mod convert;
 mod inject;
 mod ipc;
+mod keymaps;
 mod reader;
+mod selection;
 mod trigger;
 
 use buffer::InputBuffer;
@@ -18,6 +25,7 @@ use convert::{ConversionPlan, Converter};
 use inject::Injector;
 use ipc::IpcClient;
 use reader::Reader;
+use selection::{SelectionConverter, SelectionPlan};
 use std::path::PathBuf;
 use std::time::Instant;
 use trigger::{GestureKind, TriggerMachine};
@@ -47,6 +55,27 @@ fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPla
     }
     if let Err(error) = injector.replay(&plan.replay) {
         eprintln!("convert: replay failed: {error}");
+    }
+}
+
+/// Publish the converted text, switch by index, wait for the layout-changed
+/// event, then paste over the selection. Neither converter advances here;
+/// the caller already updated the selection converter.
+fn apply_selection_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &SelectionPlan) {
+    if let Err(error) = clipboard::write_selection(&plan.converted) {
+        eprintln!("convert selection: clipboard write failed: {error}");
+        return;
+    }
+    if let Err(error) = ipc.switch_to(plan.target_index) {
+        eprintln!("convert selection: layout switch failed: {error}");
+        return;
+    }
+    if let Err(error) = ipc.wait_for_layout(plan.target_index) {
+        eprintln!("convert selection: layout barrier failed: {error}");
+        return;
+    }
+    if let Err(error) = injector.paste() {
+        eprintln!("convert selection: paste failed: {error}");
     }
 }
 
@@ -87,6 +116,7 @@ fn main() {
     let mut triggers = TriggerMachine::new();
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new();
+    let mut selection_converter = SelectionConverter::new();
 
     loop {
         let Some(raw) = reader.next_key(&input_dir) else {
@@ -100,6 +130,7 @@ fn main() {
             // New physical input cancels a pending undo: "repeat" only undoes
             // an immediately preceding conversion.
             converter.invalidate();
+            selection_converter.invalidate();
             if raw.value == 1 {
                 if reader::is_reset(raw.scancode) {
                     buffer.clear();
@@ -150,6 +181,10 @@ fn main() {
                             "convert: erase {} then replay after layout {} (from {current})",
                             plan.erase, plan.target_index
                         );
+                        // A fresh word conversion supersedes a pending
+                        // selection undo: "repeat" only undoes the
+                        // immediately preceding conversion.
+                        selection_converter.invalidate();
                         apply_plan(&mut ipc, &mut injector, &plan);
                     }
                     Err(error) => eprintln!("convert: skipped ({error})"),
@@ -159,7 +194,44 @@ fn main() {
                 eprintln!("gesture: phrase (wired by ticket 10)");
             }
             GestureKind::Selection => {
-                eprintln!("gesture: selection (wired by ticket 09)");
+                if gesture.undo && selection_converter.has_pending_undo() {
+                    if let Some(plan) = selection_converter.undo() {
+                        eprintln!(
+                            "undo selection: paste back after layout {}",
+                            plan.target_index
+                        );
+                        apply_selection_plan(&mut ipc, &mut injector, &plan);
+                    }
+                    continue;
+                }
+                let (current, count) = match ipc.current_layout() {
+                    Ok(layout) => layout,
+                    Err(error) => {
+                        eprintln!("convert selection: layout read failed: {error}");
+                        continue;
+                    }
+                };
+                let text = match clipboard::read_selection() {
+                    Ok(text) => text,
+                    Err(error) => {
+                        eprintln!("convert selection: clipboard read failed: {error}");
+                        continue;
+                    }
+                };
+                match selection_converter.convert(&text, current, count) {
+                    Ok(plan) => {
+                        eprintln!(
+                            "convert selection: paste {} chars after layout {} (from {current})",
+                            plan.converted.chars().count(),
+                            plan.target_index
+                        );
+                        // A fresh selection conversion supersedes a pending
+                        // word undo (see the word arm above).
+                        converter.invalidate();
+                        apply_selection_plan(&mut ipc, &mut injector, &plan);
+                    }
+                    Err(error) => eprintln!("convert selection: skipped ({error})"),
+                }
             }
         }
     }
