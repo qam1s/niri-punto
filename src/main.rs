@@ -132,7 +132,7 @@ fn do_convert_selection(
     // A fresh selection conversion supersedes a pending word undo: "repeat"
     // only undoes the immediately preceding conversion.
     converter.invalidate();
-    apply_selection_plan(ipc, injector, &plan);
+    apply_selection_plan(ipc, injector, &plan)?;
     Ok(detail)
 }
 
@@ -153,23 +153,35 @@ fn do_undo(
 
 /// Publish the converted text, switch by index, wait for the layout-changed
 /// event, then paste over the selection. Neither converter advances here;
-/// the caller already updated the selection converter.
-fn apply_selection_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &SelectionPlan) {
+/// the caller already updated the selection converter. Mirrors
+/// [`apply_plan`]: each failure is logged and returned, so bind replies
+/// report it instead of an unconditional Ok.
+fn apply_selection_plan(
+    ipc: &mut IpcClient,
+    injector: &mut Injector,
+    plan: &SelectionPlan,
+) -> Result<(), String> {
     if let Err(error) = clipboard::write_selection(&plan.converted) {
-        eprintln!("convert selection: clipboard write failed: {error}");
-        return;
+        let detail = format!("clipboard write failed: {error}");
+        eprintln!("convert selection: {detail}");
+        return Err(detail);
     }
     if let Err(error) = ipc.switch_to(plan.hop.target) {
-        eprintln!("convert selection: layout switch failed: {error}");
-        return;
+        let detail = format!("layout switch failed: {error}");
+        eprintln!("convert selection: {detail}");
+        return Err(detail);
     }
     if let Err(error) = ipc.wait_for_layout(plan.hop.target) {
-        eprintln!("convert selection: layout barrier failed: {error}");
-        return;
+        let detail = format!("layout barrier failed: {error}");
+        eprintln!("convert selection: {detail}");
+        return Err(detail);
     }
     if let Err(error) = injector.paste() {
-        eprintln!("convert selection: paste failed: {error}");
+        let detail = format!("paste failed: {error}");
+        eprintln!("convert selection: {detail}");
+        return Err(detail);
     }
+    Ok(())
 }
 
 fn main() {
@@ -489,7 +501,9 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
                         "undo selection: paste back after layout {}",
                         plan.hop.target
                     );
-                    apply_selection_plan(ipc, injector, &plan);
+                    if let Err(detail) = apply_selection_plan(ipc, injector, &plan) {
+                        eprintln!("undo selection: {detail}");
+                    }
                 }
                 return;
             }
