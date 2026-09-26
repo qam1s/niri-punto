@@ -1,0 +1,27 @@
+# Build output
+/target/
+/builds/
+**/*.rs.bk
+
+# Debug symbols
+*.pdb
+
+# Editor / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+
+# Local scratch
+/tmp/
+.scratch/
+
+# Local docs and drafts (not published)
+docs/
+
+# Personal agent config
+.opencode/
