@@ -1,10 +1,11 @@
 //! niri-punto: Punto Switcher-style daemon for the niri compositor.
 //!
-//! Ticket 08 (word conversion): read real key presses, and on Double Shift
-//! erase the last word via uinput, switch the layout by explicit index over
-//! niri IPC, wait for the layout-changed event, then replay the same
-//! scancodes. Repeating the gesture undoes the conversion. Phrase and
-//! selection gestures are recognized but wired by later tickets.
+//! Ticket 10 (phrase + binds): Double Shift converts the last word,
+//! Shift+DoubleShift converts the phrase (whole buffer), and the `run`
+//! daemon also serves `convert-word` / `convert-selection` requests from
+//! niri binds over its control socket. Repeating a gesture undoes the
+//! conversion. Selection conversion is another ticket's lane: the protocol
+//! accepts it but the daemon answers "not wired yet".
 
 mod buffer;
 mod convert;
@@ -13,7 +14,7 @@ mod ipc;
 mod reader;
 mod trigger;
 
-use buffer::InputBuffer;
+use buffer::{BufferEntry, InputBuffer};
 use convert::{ConversionPlan, Converter};
 use inject::Injector;
 use ipc::IpcClient;
@@ -31,23 +32,61 @@ fn usage() -> ! {
 
 /// Erase, switch by index, wait for the layout-changed event, then replay.
 /// The buffer stays frozen (see [`convert`]); only the [`Converter`] state
-/// advances, which the caller already updated.
-fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPlan) {
+/// advances, which the caller already updated. Returns false when any step
+/// failed (each failure is already logged); bind replies use it.
+fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPlan) -> bool {
     if let Err(error) = injector.erase(plan.erase) {
         eprintln!("convert: erase failed: {error}");
-        return;
+        return false;
     }
     if let Err(error) = ipc.switch_to(plan.target_index) {
         eprintln!("convert: layout switch failed: {error}");
-        return;
+        return false;
     }
     if let Err(error) = ipc.wait_for_layout(plan.target_index) {
         eprintln!("convert: layout barrier failed: {error}");
-        return;
+        return false;
     }
     if let Err(error) = injector.replay(&plan.replay) {
         eprintln!("convert: replay failed: {error}");
+        return false;
     }
+    true
+}
+
+/// Fresh conversion of `entries`, shared by gestures and bind requests.
+/// Returns the one-line detail for daemon logs and socket replies.
+fn do_convert(
+    entries: &[BufferEntry],
+    converter: &mut Converter,
+    ipc: &mut IpcClient,
+    injector: &mut Injector,
+) -> Result<String, String> {
+    let (current, count) = ipc
+        .current_layout()
+        .map_err(|error| format!("layout read failed: {error}"))?;
+    let plan = converter
+        .convert(entries, current, count)
+        .map_err(|error| format!("skipped ({error})"))?;
+    let detail = format!(
+        "erase {} then replay after layout {} (from {current})",
+        plan.erase, plan.target_index
+    );
+    if !apply_plan(ipc, injector, &plan) {
+        return Err("erase/switch/replay failed (see daemon log)".to_string());
+    }
+    Ok(detail)
+}
+
+/// Undo the last conversion; `None` when there is nothing to undo.
+fn do_undo(converter: &mut Converter, ipc: &mut IpcClient, injector: &mut Injector) -> Option<String> {
+    let plan = converter.undo()?;
+    let detail = format!(
+        "erase {} then replay after layout {}",
+        plan.erase, plan.target_index
+    );
+    apply_plan(ipc, injector, &plan);
+    Some(detail)
 }
 
 fn main() {
@@ -127,36 +166,29 @@ fn main() {
         match gesture.kind {
             GestureKind::Word => {
                 if gesture.undo && converter.has_pending_undo() {
-                    if let Some(plan) = converter.undo() {
-                        eprintln!(
-                            "undo: erase {} then replay after layout {}",
-                            plan.erase, plan.target_index
-                        );
-                        apply_plan(&mut ipc, &mut injector, &plan);
+                    if let Some(detail) = do_undo(&mut converter, &mut ipc, &mut injector) {
+                        eprintln!("undo: {detail}");
                     }
                     continue;
                 }
                 let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
-                let (current, count) = match ipc.current_layout() {
-                    Ok(layout) => layout,
-                    Err(error) => {
-                        eprintln!("convert: layout read failed: {error}");
-                        continue;
-                    }
-                };
-                match converter.convert(&word, current, count) {
-                    Ok(plan) => {
-                        eprintln!(
-                            "convert: erase {} then replay after layout {} (from {current})",
-                            plan.erase, plan.target_index
-                        );
-                        apply_plan(&mut ipc, &mut injector, &plan);
-                    }
-                    Err(error) => eprintln!("convert: skipped ({error})"),
+                match do_convert(&word, &mut converter, &mut ipc, &mut injector) {
+                    Ok(detail) => eprintln!("convert: {detail}"),
+                    Err(detail) => eprintln!("convert: {detail}"),
                 }
             }
             GestureKind::Phrase => {
-                eprintln!("gesture: phrase (wired by ticket 10)");
+                if gesture.undo && converter.has_pending_undo() {
+                    if let Some(detail) = do_undo(&mut converter, &mut ipc, &mut injector) {
+                        eprintln!("undo: {detail}");
+                    }
+                    continue;
+                }
+                let phrase = buffer.phrase().to_vec();
+                match do_convert(&phrase, &mut converter, &mut ipc, &mut injector) {
+                    Ok(detail) => eprintln!("phrase: {detail}"),
+                    Err(detail) => eprintln!("phrase: {detail}"),
+                }
             }
             GestureKind::Selection => {
                 eprintln!("gesture: selection (wired by ticket 09)");
