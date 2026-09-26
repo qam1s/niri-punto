@@ -19,6 +19,7 @@
 
 use crate::buffer::BufferEntry;
 use crate::config::LayoutPair;
+use crate::undo::{LayoutCtx, LayoutHop, Reversible, UndoChain};
 use std::fmt;
 
 /// One conversion step: erase, switch, replay.
@@ -26,23 +27,20 @@ use std::fmt;
 pub struct ConversionPlan {
     /// How many Backspaces to emit.
     pub erase: usize,
-    /// Layout index active before this step (for logging and undo).
-    pub from_index: u8,
-    /// Layout index to switch to by explicit index (never next).
-    pub target_index: u8,
+    /// Layout hop by explicit index (never next).
+    pub hop: LayoutHop,
     /// Scancodes to replay once the layout-changed event arrives.
     pub replay: Vec<BufferEntry>,
 }
 
-impl ConversionPlan {
+impl Reversible for ConversionPlan {
     /// The same step in the opposite direction: same erase count and replay
     /// list, swapped layout hop. Works because replay re-emits identical
     /// scancodes either way.
-    pub fn reversed(&self) -> Self {
+    fn reversed(&self) -> Self {
         Self {
             erase: self.erase,
-            from_index: self.target_index,
-            target_index: self.from_index,
+            hop: self.hop.swapped(),
             replay: self.replay.clone(),
         }
     }
@@ -83,8 +81,7 @@ impl fmt::Display for ConversionError {
 
 impl std::error::Error for ConversionError {}
 
-/// Plan a conversion of `entries` (usually the trailing word) from layout
-/// `current` to the other layout of the configured `pair`.
+/// Plan a conversion of `entries` (usually the trailing word) inside `ctx.
 ///
 /// Position in the pair maps to the niri layout index, so the hop is
 /// `1 - current`. With more than two niri layouts conversion still works
@@ -92,42 +89,31 @@ impl std::error::Error for ConversionError {}
 /// loudly rather than corrupting text silently.
 pub fn plan_conversion(
     entries: &[BufferEntry],
-    current: u8,
-    layout_count: usize,
-    pair: &LayoutPair,
+    ctx: LayoutCtx<'_>,
 ) -> Result<ConversionPlan, ConversionError> {
     if entries.is_empty() {
         return Err(ConversionError::Empty);
     }
-    if current > 1 || layout_count < 2 {
-        return Err(ConversionError::Layouts {
-            current,
-            count: layout_count,
-            pair: pair.clone(),
-        });
-    }
     Ok(ConversionPlan {
         erase: entries.len(),
-        from_index: current,
-        target_index: 1 - current,
+        hop: ctx.hop()?,
         replay: entries.to_vec(),
     })
 }
 
-/// Tracks the convert/undo chain across gestures.
-///
-/// A fresh gesture plans a new conversion and remembers it; a repeated
-/// gesture undoes the remembered step and keeps the reversed step, so a
-/// third repeat redoes (toggle chain). Any physical typing between gestures
-/// must call [`Converter::invalidate`], cancelling the pending undo.
+/// Tracks the convert/undo chain across gestures: a thin wrapper over the
+/// shared [`UndoChain`] remembering the configured pair for planning.
 pub struct Converter {
-    last: Option<ConversionPlan>,
+    chain: UndoChain<ConversionPlan>,
     pair: LayoutPair,
 }
 
 impl Converter {
     pub fn new(pair: LayoutPair) -> Self {
-        Self { last: None, pair }
+        Self {
+            chain: UndoChain::new(),
+            pair,
+        }
     }
 
     /// Plan a fresh conversion and remember it for a later undo.
@@ -137,28 +123,32 @@ impl Converter {
         current: u8,
         layout_count: usize,
     ) -> Result<ConversionPlan, ConversionError> {
-        let plan = plan_conversion(entries, current, layout_count, &self.pair)?;
-        self.last = Some(plan.clone());
+        let plan = plan_conversion(
+            entries,
+            LayoutCtx {
+                current,
+                count: layout_count,
+                pair: &self.pair,
+            },
+        )?;
+        self.chain.remember(plan.clone());
         Ok(plan)
     }
 
     /// Whether a repeated gesture has a conversion to undo.
     pub fn has_pending_undo(&self) -> bool {
-        self.last.is_some()
+        self.chain.has_pending_undo()
     }
 
     /// Undo the last step (or redo the undo, toggling back). Returns `None`
     /// when [`Converter::invalidate`] ran since, or no conversion happened.
     pub fn undo(&mut self) -> Option<ConversionPlan> {
-        let done = self.last.take()?;
-        let back = done.reversed();
-        self.last = Some(back.clone());
-        Some(back)
+        self.chain.undo()
     }
 
     /// New physical input cancels the pending undo.
     pub fn invalidate(&mut self) {
-        self.last = None;
+        self.chain.invalidate();
     }
 }
 
@@ -171,9 +161,18 @@ impl Default for Converter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::undo::LayoutCtx;
 
     fn pair() -> LayoutPair {
         LayoutPair::new("us", "ru").unwrap()
+    }
+
+    fn ctx(pair: &LayoutPair, current: u8, count: usize) -> LayoutCtx<'_> {
+        LayoutCtx {
+            current,
+            count,
+            pair,
+        }
     }
 
     fn entry(scancode: u16) -> BufferEntry {
@@ -190,22 +189,22 @@ mod tests {
 
     #[test]
     fn word_plans_erase_replay_and_other_index() {
-        let plan = plan_conversion(&word(), 0, 2, &pair()).unwrap();
+        let plan = plan_conversion(&word(), ctx(&pair(), 0, 2)).unwrap();
         assert_eq!(plan.erase, 6);
-        assert_eq!((plan.from_index, plan.target_index), (0, 1));
+        assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
         assert_eq!(plan.replay, word());
     }
 
     #[test]
     fn conversion_from_second_layout_points_back() {
-        let plan = plan_conversion(&word(), 1, 2, &pair()).unwrap();
-        assert_eq!((plan.from_index, plan.target_index), (1, 0));
+        let plan = plan_conversion(&word(), ctx(&pair(), 1, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
     }
 
     #[test]
     fn phrase_slice_plans_too_for_the_ticket_10_seam() {
         let phrase = [30, 31, 57, 32].map(entry).to_vec();
-        let plan = plan_conversion(&phrase, 0, 2, &pair()).unwrap();
+        let plan = plan_conversion(&phrase, ctx(&pair(), 0, 2)).unwrap();
         assert_eq!(plan.erase, 4);
         assert_eq!(plan.replay, phrase);
     }
@@ -213,7 +212,7 @@ mod tests {
     #[test]
     fn empty_word_is_refused() {
         assert_eq!(
-            plan_conversion(&[], 0, 2, &pair()),
+            plan_conversion(&[], ctx(&pair(), 0, 2)),
             Err(ConversionError::Empty)
         );
     }
@@ -221,21 +220,21 @@ mod tests {
     #[test]
     fn short_single_entry_word_converts() {
         let one = [30].map(entry).to_vec();
-        let plan = plan_conversion(&one, 0, 2, &pair()).unwrap();
+        let plan = plan_conversion(&one, ctx(&pair(), 0, 2)).unwrap();
         assert_eq!(plan.erase, 1);
     }
 
     #[test]
     fn conversion_inside_the_pair_survives_extra_layouts() {
-        let plan = plan_conversion(&word(), 0, 3, &pair()).unwrap();
-        assert_eq!((plan.from_index, plan.target_index), (0, 1));
-        let plan = plan_conversion(&word(), 1, 3, &pair()).unwrap();
-        assert_eq!((plan.from_index, plan.target_index), (1, 0));
+        let plan = plan_conversion(&word(), ctx(&pair(), 0, 3)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
+        let plan = plan_conversion(&word(), ctx(&pair(), 1, 3)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
     }
 
     #[test]
     fn third_language_is_refused_and_names_the_pair() {
-        let error = plan_conversion(&word(), 2, 3, &pair()).unwrap_err();
+        let error = plan_conversion(&word(), ctx(&pair(), 2, 3)).unwrap_err();
         assert_eq!(
             error,
             ConversionError::Layouts {
@@ -253,7 +252,7 @@ mod tests {
     #[test]
     fn single_layout_setup_is_refused() {
         assert_eq!(
-            plan_conversion(&word(), 0, 1, &pair()),
+            plan_conversion(&word(), ctx(&pair(), 0, 1)),
             Err(ConversionError::Layouts {
                 current: 0,
                 count: 1,
@@ -265,7 +264,7 @@ mod tests {
     #[test]
     fn out_of_range_current_index_is_refused() {
         assert_eq!(
-            plan_conversion(&word(), 5, 2, &pair()),
+            plan_conversion(&word(), ctx(&pair(), 5, 2)),
             Err(ConversionError::Layouts {
                 current: 5,
                 count: 2,
@@ -276,9 +275,9 @@ mod tests {
 
     #[test]
     fn undo_reverses_the_hop_keeping_erase_and_replay() {
-        let plan = plan_conversion(&word(), 0, 2, &pair()).unwrap();
+        let plan = plan_conversion(&word(), ctx(&pair(), 0, 2)).unwrap();
         let back = plan.reversed();
-        assert_eq!((back.from_index, back.target_index), (1, 0));
+        assert_eq!((back.hop.from, back.hop.target), (1, 0));
         assert_eq!(back.erase, plan.erase);
         assert_eq!(back.replay, plan.replay);
     }
@@ -320,7 +319,7 @@ mod tests {
         let plan = converter.convert(&other, 1, 2).unwrap();
         assert_eq!(plan.replay, other);
         let back = converter.undo().unwrap();
-        assert_eq!((back.from_index, back.target_index), (0, 1));
+        assert_eq!((back.hop.from, back.hop.target), (0, 1));
         assert_eq!(back.replay, other);
     }
 }

@@ -29,6 +29,7 @@ mod reader;
 mod selection;
 mod setup;
 mod trigger;
+mod undo;
 
 use buffer::{BufferEntry, InputBuffer};
 use control::{ControlKind, ControlRequest};
@@ -66,11 +67,11 @@ fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPla
         eprintln!("convert: erase failed: {error}");
         return false;
     }
-    if let Err(error) = ipc.switch_to(plan.target_index) {
+    if let Err(error) = ipc.switch_to(plan.hop.target) {
         eprintln!("convert: layout switch failed: {error}");
         return false;
     }
-    if let Err(error) = ipc.wait_for_layout(plan.target_index) {
+    if let Err(error) = ipc.wait_for_layout(plan.hop.target) {
         eprintln!("convert: layout barrier failed: {error}");
         return false;
     }
@@ -97,7 +98,7 @@ fn do_convert(
         .map_err(|error| format!("skipped ({error})"))?;
     let detail = format!(
         "erase {} then replay after layout {} (from {current})",
-        plan.erase, plan.target_index
+        plan.erase, plan.hop.target
     );
     if !apply_plan(ipc, injector, &plan) {
         return Err("erase/switch/replay failed (see daemon log)".to_string());
@@ -124,7 +125,7 @@ fn do_convert_selection(
     let detail = format!(
         "paste {} chars after layout {} (from {current})",
         plan.converted.chars().count(),
-        plan.target_index
+        plan.hop.target
     );
     // A fresh selection conversion supersedes a pending word undo: "repeat"
     // only undoes the immediately preceding conversion.
@@ -142,7 +143,7 @@ fn do_undo(
     let plan = converter.undo()?;
     let detail = format!(
         "erase {} then replay after layout {}",
-        plan.erase, plan.target_index
+        plan.erase, plan.hop.target
     );
     apply_plan(ipc, injector, &plan);
     Some(detail)
@@ -156,11 +157,11 @@ fn apply_selection_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &Sel
         eprintln!("convert selection: clipboard write failed: {error}");
         return;
     }
-    if let Err(error) = ipc.switch_to(plan.target_index) {
+    if let Err(error) = ipc.switch_to(plan.hop.target) {
         eprintln!("convert selection: layout switch failed: {error}");
         return;
     }
-    if let Err(error) = ipc.wait_for_layout(plan.target_index) {
+    if let Err(error) = ipc.wait_for_layout(plan.hop.target) {
         eprintln!("convert selection: layout barrier failed: {error}");
         return;
     }
@@ -472,7 +473,7 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
                 if let Some(plan) = selection_converter.undo() {
                     eprintln!(
                         "undo selection: paste back after layout {}",
-                        plan.target_index
+                        plan.hop.target
                     );
                     apply_selection_plan(ipc, injector, &plan);
                 }
