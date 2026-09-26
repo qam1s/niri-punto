@@ -1,16 +1,22 @@
 //! niri-punto: Punto Switcher-style daemon for the niri compositor.
 //!
-//! Ticket 08 (word conversion): read real key presses, and on Double Shift
-//! erase the last word via uinput, switch the layout by explicit index over
-//! niri IPC, wait for the layout-changed event, then replay the same
-//! scancodes. Repeating the gesture undoes the conversion. Phrase and
-//! selection gestures are recognized but wired by later tickets.
+//! Without arguments (ticket 08: word conversion): read real key presses,
+//! and on Double Shift erase the last word via uinput, switch the layout by
+//! explicit index over niri IPC, wait for the layout-changed event, then
+//! replay the same scancodes. Repeating the gesture undoes the conversion.
+//! Phrase and selection gestures are recognized but wired by later tickets.
+//!
+//! `setup` installs binary, user unit, default config, and the udev rule
+//! (ticket 11); `doctor` checks devices, permissions, socket, and layouts.
 
 mod buffer;
+mod config;
 mod convert;
+mod doctor;
 mod inject;
 mod ipc;
 mod reader;
+mod setup;
 mod trigger;
 
 use buffer::InputBuffer;
@@ -23,9 +29,11 @@ use std::time::Instant;
 use trigger::{GestureKind, TriggerMachine};
 
 fn usage() -> ! {
-    eprintln!("usage: niri-punto [--input-dir DIR]");
-    eprintln!("  Converts the last word on Double Shift; repeating the");
-    eprintln!("  gesture undoes. Needs /dev/uinput and $NIRI_SOCKET.");
+    eprintln!("usage: niri-punto [--input-dir DIR] [--config PATH]");
+    eprintln!("       niri-punto setup [--no-udev] [--dry-run]");
+    eprintln!("       niri-punto doctor");
+    eprintln!("  Daemon converts the last word on Double Shift; repeating the");
+    eprintln!("  gesture undoes. Needs /dev/uinput, $NIRI_SOCKET, and config.kdl.");
     std::process::exit(2);
 }
 
@@ -51,17 +59,69 @@ fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPla
 }
 
 fn main() {
-    let mut input_dir = PathBuf::from("/dev/input");
-    let mut args = std::env::args().skip(1);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    match args.first().map(String::as_str) {
+        Some("setup") => {
+            let mut options = setup::Options::default();
+            for arg in &args[1..] {
+                match arg.as_str() {
+                    "--no-udev" => options.no_udev = true,
+                    "--dry-run" => options.dry_run = true,
+                    _ => usage(),
+                }
+            }
+            let paths = match setup::resolve() {
+                Ok(paths) => paths,
+                Err(error) => {
+                    eprintln!("setup: {error}");
+                    std::process::exit(1);
+                }
+            };
+            std::process::exit(setup::run(options, &paths, &setup::RealRunner));
+        }
+        Some("doctor") => {
+            if args.len() > 1 {
+                usage();
+            }
+            std::process::exit(doctor::run());
+        }
+        Some("convert-word") | Some("convert-selection") => {
+            eprintln!("not yet: wired by a later ticket (09/10)");
+            std::process::exit(2);
+        }
+        _ => daemon(args.into_iter()),
+    }
+}
+
+fn daemon(args: impl Iterator<Item = String>) -> ! {
+    let mut input_dir = PathBuf::from(doctor::INPUT_DIR);
+    let mut config_override: Option<PathBuf> = None;
+    let mut args = args.peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--input-dir" => {
                 input_dir = args.next().map(PathBuf::from).unwrap_or_else(|| usage());
             }
+            "--config" => {
+                config_override = Some(args.next().map(PathBuf::from).unwrap_or_else(|| usage()));
+            }
             "-h" | "--help" => usage(),
             _ => usage(),
         }
     }
+
+    let pair = match config_override {
+        Some(path) => config::load_from(&path),
+        None => config::load(),
+    };
+    let pair = match pair {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("config: {error}");
+            eprintln!("hint: run `niri-punto setup` to write the default config");
+            std::process::exit(1);
+        }
+    };
 
     let mut injector = match Injector::open() {
         Ok(injector) => injector,
@@ -86,7 +146,7 @@ fn main() {
     let start = Instant::now();
     let mut triggers = TriggerMachine::new();
     let mut buffer = InputBuffer::default();
-    let mut converter = Converter::new();
+    let mut converter = Converter::new(pair);
 
     loop {
         let Some(raw) = reader.next_key(&input_dir) else {
