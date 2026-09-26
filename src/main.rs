@@ -8,6 +8,7 @@
 //! accepts it but the daemon answers "not wired yet".
 
 mod buffer;
+mod control;
 mod convert;
 mod inject;
 mod ipc;
@@ -15,18 +16,26 @@ mod reader;
 mod trigger;
 
 use buffer::{BufferEntry, InputBuffer};
+use control::{ControlKind, ControlRequest};
 use convert::{ConversionPlan, Converter};
 use inject::Injector;
 use ipc::IpcClient;
 use reader::Reader;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 use trigger::{GestureKind, TriggerMachine};
 
+/// How often the main loop wakes to serve control-socket bind requests.
+const CONTROL_POLL: Duration = Duration::from_millis(100);
+
 fn usage() -> ! {
-    eprintln!("usage: niri-punto [--input-dir DIR]");
-    eprintln!("  Converts the last word on Double Shift; repeating the");
-    eprintln!("  gesture undoes. Needs /dev/uinput and $NIRI_SOCKET.");
+    eprintln!("usage: niri-punto <command> [options]");
+    eprintln!("  run [--input-dir DIR]  start the daemon (single instance)");
+    eprintln!("  convert-word           ask the running daemon to convert the last word");
+    eprintln!("  convert-selection      ask the running daemon to convert the selection");
+    eprintln!("Double Shift converts the word, Shift+DoubleShift the phrase;");
+    eprintln!("niri binds (e.g. Mod+L) use the convert-* subcommands.");
     std::process::exit(2);
 }
 
@@ -79,7 +88,11 @@ fn do_convert(
 }
 
 /// Undo the last conversion; `None` when there is nothing to undo.
-fn do_undo(converter: &mut Converter, ipc: &mut IpcClient, injector: &mut Injector) -> Option<String> {
+fn do_undo(
+    converter: &mut Converter,
+    ipc: &mut IpcClient,
+    injector: &mut Injector,
+) -> Option<String> {
     let plan = converter.undo()?;
     let detail = format!(
         "erase {} then replay after layout {}",
@@ -90,22 +103,99 @@ fn do_undo(converter: &mut Converter, ipc: &mut IpcClient, injector: &mut Inject
 }
 
 fn main() {
-    let mut input_dir = PathBuf::from("/dev/input");
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--input-dir" => {
-                input_dir = args.next().map(PathBuf::from).unwrap_or_else(|| usage());
-            }
-            "-h" | "--help" => usage(),
-            _ => usage(),
+    let raw: Vec<String> = std::env::args().skip(1).collect();
+    // The ticket 08 invocation without a subcommand still starts the daemon.
+    let (command, rest) = match raw.first().map(String::as_str) {
+        None | Some("--input-dir") => ("run", raw.as_slice()),
+        Some("run") | Some("convert-word") | Some("convert-selection") => {
+            (raw[0].as_str(), &raw[1..])
         }
+        _ => usage(),
+    };
+    match command {
+        "run" => {
+            let mut input_dir = PathBuf::from("/dev/input");
+            let mut rest = rest.iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--input-dir" => {
+                        input_dir = rest.next().map(PathBuf::from).unwrap_or_else(|| usage());
+                    }
+                    _ => usage(),
+                }
+            }
+            run(input_dir);
+        }
+        "convert-word" => {
+            if !rest.is_empty() {
+                usage();
+            }
+            client(ControlKind::Word);
+        }
+        "convert-selection" => {
+            if !rest.is_empty() {
+                usage();
+            }
+            client(ControlKind::Selection);
+        }
+        _ => usage(),
+    }
+}
+
+/// One-shot client for niri binds: send the request to the running daemon
+/// and report its one-line reply. Never starts a daemon.
+fn client(kind: ControlKind) {
+    let path = control::socket_path();
+    match control::send(&path, kind) {
+        Ok(reply) if reply == "ok" || reply.starts_with("ok ") => {
+            println!("{reply}");
+        }
+        Ok(reply) => {
+            eprintln!("{reply}");
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn run(input_dir: PathBuf) {
+    // Single-instance guard first: a live socket means another daemon owns
+    // the input, so exit before touching hardware.
+    let socket_path = control::socket_path();
+    let listener = match control::bind(&socket_path) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+    };
+    eprintln!("control: listening on {}", socket_path.display());
+    let (ctrl_tx, ctrl_rx) = mpsc::channel::<ControlRequest>();
+    if std::thread::Builder::new()
+        .name("control".to_string())
+        .spawn(move || {
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(stream) => {
+                        control::serve_one(stream, &ctrl_tx);
+                    }
+                    Err(_) => break,
+                }
+            }
+        })
+        .is_err()
+    {
+        eprintln!("control: listener thread failed; binds will not work");
     }
 
     let mut injector = match Injector::open() {
         Ok(injector) => injector,
         Err(error) => {
             eprintln!("uinput unavailable (/dev/uinput): {error}");
+            let _ = std::fs::remove_file(&socket_path);
             std::process::exit(1);
         }
     };
@@ -113,6 +203,7 @@ fn main() {
         Ok(ipc) => ipc,
         Err(error) => {
             eprintln!("niri IPC unavailable ($NIRI_SOCKET): {error}");
+            let _ = std::fs::remove_file(&socket_path);
             std::process::exit(1);
         }
     };
@@ -128,71 +219,111 @@ fn main() {
     let mut converter = Converter::new();
 
     loop {
-        let Some(raw) = reader.next_key(&input_dir) else {
-            eprintln!("input: no devices left, exiting");
-            std::process::exit(1);
-        };
-        let now_ms = start.elapsed().as_millis() as u64;
-        let key = reader::classify(raw.scancode);
-
-        if reader::is_typing_key(key, raw.value) {
-            // New physical input cancels a pending undo: "repeat" only undoes
-            // an immediately preceding conversion.
-            converter.invalidate();
-            if raw.value == 1 {
-                if reader::is_reset(raw.scancode) {
-                    buffer.clear();
-                    eprintln!("buffer: cleared (esc)");
-                } else {
-                    buffer.push(reader::buffer_entry_for(
-                        raw.scancode,
-                        triggers.shift_held(),
-                    ));
+        match reader.poll(&input_dir, CONTROL_POLL) {
+            reader::Poll::Gone => {
+                eprintln!("input: no devices left, exiting");
+                let _ = std::fs::remove_file(&socket_path);
+                std::process::exit(1);
+            }
+            reader::Poll::Idle => {}
+            reader::Poll::Key(raw) => handle_key(
+                raw,
+                &start,
+                &mut triggers,
+                &mut buffer,
+                &mut converter,
+                &mut ipc,
+                &mut injector,
+            ),
+        }
+        while let Ok(request) = ctrl_rx.try_recv() {
+            let answer = match request.kind {
+                ControlKind::Word => {
+                    let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
+                    match do_convert(&word, &mut converter, &mut ipc, &mut injector) {
+                        Ok(detail) => format!("ok bind-word: {detail}"),
+                        Err(detail) => format!("err bind-word: {detail}"),
+                    }
                 }
+                ControlKind::Selection => {
+                    "err selection conversion is not wired yet (see ticket 09)".to_string()
+                }
+            };
+            eprintln!("control: {} -> {answer}", request.kind.as_line().trim());
+            let _ = request.reply.send(answer);
+        }
+    }
+}
+
+fn handle_key(
+    raw: reader::RawKey,
+    start: &Instant,
+    triggers: &mut TriggerMachine,
+    buffer: &mut InputBuffer,
+    converter: &mut Converter,
+    ipc: &mut IpcClient,
+    injector: &mut Injector,
+) {
+    let now_ms = start.elapsed().as_millis() as u64;
+    let key = reader::classify(raw.scancode);
+
+    if reader::is_typing_key(key, raw.value) {
+        // New physical input cancels a pending undo: "repeat" only undoes
+        // an immediately preceding conversion.
+        converter.invalidate();
+        if raw.value == 1 {
+            if reader::is_reset(raw.scancode) {
+                buffer.clear();
+                eprintln!("buffer: cleared (esc)");
             } else {
-                // Autorepeat: the character repeats on screen, so it repeats
-                // in the buffer too.
                 buffer.push(reader::buffer_entry_for(
                     raw.scancode,
                     triggers.shift_held(),
                 ));
             }
+        } else {
+            // Autorepeat: the character repeats on screen, so it repeats
+            // in the buffer too.
+            buffer.push(reader::buffer_entry_for(
+                raw.scancode,
+                triggers.shift_held(),
+            ));
         }
+    }
 
-        let pressed = raw.value != 0;
-        let Some(gesture) = triggers.key(key, pressed, now_ms) else {
-            continue;
-        };
-        match gesture.kind {
-            GestureKind::Word => {
-                if gesture.undo && converter.has_pending_undo() {
-                    if let Some(detail) = do_undo(&mut converter, &mut ipc, &mut injector) {
-                        eprintln!("undo: {detail}");
-                    }
-                    continue;
+    let pressed = raw.value != 0;
+    let Some(gesture) = triggers.key(key, pressed, now_ms) else {
+        return;
+    };
+    match gesture.kind {
+        GestureKind::Word => {
+            if gesture.undo && converter.has_pending_undo() {
+                if let Some(detail) = do_undo(converter, ipc, injector) {
+                    eprintln!("undo: {detail}");
                 }
-                let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
-                match do_convert(&word, &mut converter, &mut ipc, &mut injector) {
-                    Ok(detail) => eprintln!("convert: {detail}"),
-                    Err(detail) => eprintln!("convert: {detail}"),
-                }
+                return;
             }
-            GestureKind::Phrase => {
-                if gesture.undo && converter.has_pending_undo() {
-                    if let Some(detail) = do_undo(&mut converter, &mut ipc, &mut injector) {
-                        eprintln!("undo: {detail}");
-                    }
-                    continue;
-                }
-                let phrase = buffer.phrase().to_vec();
-                match do_convert(&phrase, &mut converter, &mut ipc, &mut injector) {
-                    Ok(detail) => eprintln!("phrase: {detail}"),
-                    Err(detail) => eprintln!("phrase: {detail}"),
-                }
+            let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
+            match do_convert(&word, converter, ipc, injector) {
+                Ok(detail) => eprintln!("convert: {detail}"),
+                Err(detail) => eprintln!("convert: {detail}"),
             }
-            GestureKind::Selection => {
-                eprintln!("gesture: selection (wired by ticket 09)");
+        }
+        GestureKind::Phrase => {
+            if gesture.undo && converter.has_pending_undo() {
+                if let Some(detail) = do_undo(converter, ipc, injector) {
+                    eprintln!("undo: {detail}");
+                }
+                return;
             }
+            let phrase = buffer.phrase().to_vec();
+            match do_convert(&phrase, converter, ipc, injector) {
+                Ok(detail) => eprintln!("phrase: {detail}"),
+                Err(detail) => eprintln!("phrase: {detail}"),
+            }
+        }
+        GestureKind::Selection => {
+            eprintln!("gesture: selection (wired by ticket 09)");
         }
     }
 }
