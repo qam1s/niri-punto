@@ -81,34 +81,34 @@ fn lookup_ru(glyph: char) -> Option<char> {
     PAIRS.iter().find(|(_, ru)| *ru == glyph).map(|(en, _)| *en)
 }
 
-fn map_char(next: char, from_ru: bool) -> char {
+fn map_char(ch: char, from_ru: bool) -> char {
     if from_ru {
         // Exact pairs first: shifted symbols have no case relation, so
         // case-folding their uppercase Cyrillic side would lose them
         // (',' has no uppercase; Б must map back to '<', not ',').
-        if let Some(mapped) = lookup_ru(next) {
+        if let Some(mapped) = lookup_ru(ch) {
             return mapped;
         }
         // Uppercase Cyrillic derives from the lowercase pair: Й -> й -> q -> Q.
-        let mut folded = next.to_lowercase();
+        let mut folded = ch.to_lowercase();
         if let (Some(lower), None) = (folded.next(), folded.next())
-            && lower != next
+            && lower != ch
             && let Some(mapped) = lookup_ru(lower)
         {
             return mapped.to_ascii_uppercase();
         }
-        next
+        ch
     } else {
-        if let Some(mapped) = lookup_en(next) {
+        if let Some(mapped) = lookup_en(ch) {
             return mapped;
         }
         // Uppercase Latin derives the same way: Q -> q -> й -> Й.
-        if next.is_ascii_uppercase() {
-            return lookup_en(next.to_ascii_lowercase())
+        if ch.is_ascii_uppercase() {
+            return lookup_en(ch.to_ascii_lowercase())
                 .map(|mapped| mapped.to_uppercase().next().unwrap_or(mapped))
-                .unwrap_or(next);
+                .unwrap_or(ch);
         }
-        next
+        ch
     }
 }
 
@@ -117,7 +117,7 @@ fn map_char(next: char, from_ru: bool) -> char {
 /// Unmapped characters (digits, emoji, third-language text, whitespace) pass
 /// through unchanged.
 pub fn convert(text: &str, from_ru: bool) -> String {
-    text.chars().map(|next| map_char(next, from_ru)).collect()
+    text.chars().map(|ch| map_char(ch, from_ru)).collect()
 }
 
 #[cfg(test)]
