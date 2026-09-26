@@ -43,10 +43,14 @@ impl InputBuffer {
         self.entries.clear();
     }
 
+    // `len`/`entries` are the read seam for tickets 09/10 (selection,
+    // phrase); unused by the word-only loop of ticket 08.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
+    #[allow(dead_code)]
     pub fn entries(&self) -> &[BufferEntry] {
         &self.entries
     }
