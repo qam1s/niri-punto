@@ -91,7 +91,7 @@ pub fn paste_strokes() -> Vec<KeyStroke> {
     ]
 }
 
-/// Virtual keyboard that emits corrections. Open once, reuse across gestures.
+/// uinput device that emits corrections. Open once, reuse across gestures.
 pub struct Injector {
     device: VirtualDevice,
 }

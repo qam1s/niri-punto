@@ -21,6 +21,7 @@ mod clipboard;
 mod config;
 mod control;
 mod convert;
+mod detector;
 mod doctor;
 mod inject;
 mod ipc;
@@ -29,10 +30,12 @@ mod reader;
 mod selection;
 mod setup;
 mod trigger;
+mod undo;
 
 use buffer::{BufferEntry, InputBuffer};
 use control::{ControlKind, ControlRequest};
 use convert::{ConversionPlan, Converter};
+use detector::{Detector, ManualOnly};
 use inject::Injector;
 use ipc::IpcClient;
 use reader::Reader;
@@ -66,12 +69,11 @@ fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPla
         eprintln!("convert: erase failed: {error}");
         return false;
     }
-    if let Err(error) = ipc.switch_to(plan.target_index) {
+    if let Err(error) = ipc.switch_to(plan.hop.target) {
         eprintln!("convert: layout switch failed: {error}");
         return false;
     }
-    if let Err(error) = ipc.wait_for_layout(plan.target_index) {
-        eprintln!("convert: layout barrier failed: {error}");
+    if !wait_for_barrier(ipc, plan.hop.target) {
         return false;
     }
     if let Err(error) = injector.replay(&plan.replay) {
@@ -79,6 +81,29 @@ fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPla
         return false;
     }
     true
+}
+
+/// Wait for the layout barrier, recovering a dead event stream with
+/// backoff first (compositor restarts must not kill conversions).
+/// Returns true when the barrier is satisfied; every failure is logged.
+fn wait_for_barrier(ipc: &mut IpcClient, target: u8) -> bool {
+    match ipc.wait_for_layout(target) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("convert: event stream failed ({error}); reconnecting");
+            match ipc.recover_barrier(target) {
+                Ok(true) => true,
+                Ok(false) => {
+                    eprintln!("convert: layout {target} not active after reconnect");
+                    false
+                }
+                Err(error) => {
+                    eprintln!("convert: event stream recovery failed: {error}");
+                    false
+                }
+            }
+        }
+    }
 }
 
 /// Fresh conversion of `entries`, shared by gestures and bind requests.
@@ -97,7 +122,7 @@ fn do_convert(
         .map_err(|error| format!("skipped ({error})"))?;
     let detail = format!(
         "erase {} then replay after layout {} (from {current})",
-        plan.erase, plan.target_index
+        plan.erase, plan.hop.target
     );
     if !apply_plan(ipc, injector, &plan) {
         return Err("erase/switch/replay failed (see daemon log)".to_string());
@@ -124,12 +149,12 @@ fn do_convert_selection(
     let detail = format!(
         "paste {} chars after layout {} (from {current})",
         plan.converted.chars().count(),
-        plan.target_index
+        plan.hop.target
     );
     // A fresh selection conversion supersedes a pending word undo: "repeat"
     // only undoes the immediately preceding conversion.
     converter.invalidate();
-    apply_selection_plan(ipc, injector, &plan);
+    apply_selection_plan(ipc, injector, &plan)?;
     Ok(detail)
 }
 
@@ -142,7 +167,7 @@ fn do_undo(
     let plan = converter.undo()?;
     let detail = format!(
         "erase {} then replay after layout {}",
-        plan.erase, plan.target_index
+        plan.erase, plan.hop.target
     );
     apply_plan(ipc, injector, &plan);
     Some(detail)
@@ -150,23 +175,33 @@ fn do_undo(
 
 /// Publish the converted text, switch by index, wait for the layout-changed
 /// event, then paste over the selection. Neither converter advances here;
-/// the caller already updated the selection converter.
-fn apply_selection_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &SelectionPlan) {
+/// the caller already updated the selection converter. Mirrors
+/// [`apply_plan`]: each failure is logged and returned, so bind replies
+/// report it instead of an unconditional Ok.
+fn apply_selection_plan(
+    ipc: &mut IpcClient,
+    injector: &mut Injector,
+    plan: &SelectionPlan,
+) -> Result<(), String> {
     if let Err(error) = clipboard::write_selection(&plan.converted) {
-        eprintln!("convert selection: clipboard write failed: {error}");
-        return;
+        let detail = format!("clipboard write failed: {error}");
+        eprintln!("convert selection: {detail}");
+        return Err(detail);
     }
-    if let Err(error) = ipc.switch_to(plan.target_index) {
-        eprintln!("convert selection: layout switch failed: {error}");
-        return;
+    if let Err(error) = ipc.switch_to(plan.hop.target) {
+        let detail = format!("layout switch failed: {error}");
+        eprintln!("convert selection: {detail}");
+        return Err(detail);
     }
-    if let Err(error) = ipc.wait_for_layout(plan.target_index) {
-        eprintln!("convert selection: layout barrier failed: {error}");
-        return;
+    if !wait_for_barrier(ipc, plan.hop.target) {
+        return Err("layout barrier failed (see daemon log)".to_string());
     }
     if let Err(error) = injector.paste() {
-        eprintln!("convert selection: paste failed: {error}");
+        let detail = format!("paste failed: {error}");
+        eprintln!("convert selection: {detail}");
+        return Err(detail);
     }
+    Ok(())
 }
 
 fn main() {
@@ -310,10 +345,13 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
             std::process::exit(1);
         }
     };
-    let mut ipc = match IpcClient::connect() {
+    let mut ipc = match IpcClient::connect_with_retry() {
         Ok(ipc) => ipc,
         Err(error) => {
             eprintln!("niri IPC unavailable ($NIRI_SOCKET): {error}");
+            eprintln!(
+                "hint: retries ran out; the systemd unit restarts the daemon as a last resort"
+            );
             let _ = std::fs::remove_file(&socket_path);
             std::process::exit(1);
         }
@@ -329,13 +367,23 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new(pair.clone());
     let mut selection_converter = SelectionConverter::new(pair);
+    let detector = ManualOnly;
+    eprintln!(
+        "detector: {} (manual-only, no auto conversion)",
+        detector.name()
+    );
 
     loop {
         match reader.poll(&input_dir, CONTROL_POLL) {
             reader::Poll::Gone => {
-                eprintln!("input: no devices left, exiting");
-                let _ = std::fs::remove_file(&socket_path);
-                std::process::exit(1);
+                // Evdev-missing path: keyboards unplugged or not yet
+                // present. Never exit here — hotplug rescans in poll pick
+                // up reappearing devices. Sleep to avoid spinning on a
+                // disconnected channel. (Distinct from the IPC-missing
+                // path above, which retries with backoff and only then
+                // exits for systemd to restart.)
+                eprintln!("input: no devices left; waiting for hotplug");
+                std::thread::sleep(CONTROL_POLL);
             }
             reader::Poll::Idle => {}
             reader::Poll::Key(raw) => {
@@ -344,6 +392,7 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
                     buffer: &mut buffer,
                     converter: &mut converter,
                     selection_converter: &mut selection_converter,
+                    detector: &detector,
                     ipc: &mut ipc,
                     injector: &mut injector,
                 };
@@ -383,12 +432,16 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
 }
 
 /// Mutable daemon state threaded through key handling (keeps `handle_key`
-/// within the argument-count lint).
+/// within the argument-count lint). The detector rides along so the future
+/// scorer slots into the gesture path without touching buffer, triggers, or
+/// injection (ADR-0006); `ManualOnly` always declines, so behavior is
+/// unchanged.
 struct Daemon<'a> {
     triggers: &'a mut TriggerMachine,
     buffer: &'a mut InputBuffer,
     converter: &'a mut Converter,
     selection_converter: &'a mut SelectionConverter,
+    detector: &'a dyn Detector,
     ipc: &'a mut IpcClient,
     injector: &'a mut Injector,
 }
@@ -399,6 +452,7 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
         buffer,
         converter,
         selection_converter,
+        detector,
         ipc,
         injector,
     } = daemon;
@@ -434,6 +488,10 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
     let Some(gesture) = triggers.key(key, pressed, now_ms) else {
         return;
     };
+    // Detector seam (ADR-0006): the future scorer observes the buffer here,
+    // at the gesture decision point. ManualOnly always declines, so the
+    // result is intentionally unused and behavior stays manual-only.
+    let _auto_score = detector.score(buffer.phrase());
     match gesture.kind {
         GestureKind::Word => {
             if gesture.undo && converter.has_pending_undo() {
@@ -472,9 +530,11 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
                 if let Some(plan) = selection_converter.undo() {
                     eprintln!(
                         "undo selection: paste back after layout {}",
-                        plan.target_index
+                        plan.hop.target
                     );
-                    apply_selection_plan(ipc, injector, &plan);
+                    if let Err(detail) = apply_selection_plan(ipc, injector, &plan) {
+                        eprintln!("undo selection: {detail}");
+                    }
                 }
                 return;
             }

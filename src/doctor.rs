@@ -17,50 +17,70 @@ pub const RULE_DEST: &str = "/etc/udev/rules.d/99-niri-punto.rules";
 
 /// A layout correspondence finding between the configured pair and niri.
 ///
-/// These are notes, never failures: with more than two niri layouts
-/// conversion still works inside the pair, and a third active language is
-/// transient state. Name equality is deliberately NOT checked: niri reports
-/// xkb descriptive names (`English (US)` for config code `us`), so only the
-/// printed index<->code table lets the user verify the order visually.
+/// Name equality is deliberately NOT checked: niri reports xkb descriptive
+/// names (`English (US)` for config code `us`), so only the printed
+/// index<->code table lets the user verify the order visually. What IS
+/// checked — count and the active index — is reported explicitly, with the
+/// pair codes and the active niri name inline, so a mismatch never passes
+/// silently.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LayoutFinding {
     /// niri reports a layout count other than the pair size.
-    CountMismatch { actual: usize },
+    CountMismatch { actual: usize, pair: LayoutPair },
     /// The current index is outside the pair (a third language active).
-    CurrentOutsidePair { current: u8, count: usize },
+    CurrentOutsidePair {
+        current: u8,
+        count: usize,
+        active: String,
+        pair: LayoutPair,
+    },
 }
 
 impl fmt::Display for LayoutFinding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::CountMismatch { actual } => write!(
+            Self::CountMismatch { actual, pair } => write!(
                 f,
-                "niri reports {actual} layouts, config holds a pair: \
-                 conversion works inside the pair only"
+                "niri reports {actual} layouts, config holds pair \
+                 (\"{}\", \"{}\"): conversion works inside the pair only",
+                pair.first, pair.second,
             ),
-            Self::CurrentOutsidePair { current, count } => write!(
+            Self::CurrentOutsidePair {
+                current,
+                count,
+                active,
+                pair,
+            } => write!(
                 f,
-                "current layout {current} (of {count}) is outside the pair: \
-                 conversion will refuse until you switch back"
+                "current layout {current} (\"{active}\", of {count}) is outside \
+                 the configured pair (\"{}\", \"{}\"): a third language is \
+                 active, conversion will refuse until you switch back",
+                pair.first, pair.second,
             ),
         }
     }
 }
 
-/// Compare the configured pair against niri's layout state. Empty means
-/// nothing worth mentioning; anything returned is a note (see
-/// [`LayoutFinding`]).
-pub fn check_layouts(_pair: &LayoutPair, names: &[String], current: u8) -> Vec<LayoutFinding> {
+/// Compare the configured pair against niri's layout state. Empty means the
+/// count matches and the active index sits inside the pair; anything
+/// returned is a note (see [`LayoutFinding`]).
+pub fn check_layouts(pair: &LayoutPair, names: &[String], current: u8) -> Vec<LayoutFinding> {
     let mut findings = Vec::new();
     if names.len() != 2 {
         findings.push(LayoutFinding::CountMismatch {
             actual: names.len(),
+            pair: pair.clone(),
         });
     }
     if current > 1 {
         findings.push(LayoutFinding::CurrentOutsidePair {
             current,
             count: names.len(),
+            active: names
+                .get(current as usize)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string()),
+            pair: pair.clone(),
         });
     }
     findings
@@ -256,14 +276,20 @@ pub fn run() -> i32 {
 }
 
 /// Layout correspondence section: the index<->code table plus any notes.
-/// Notes never fail the run; only missing data upstream does.
+/// Notes never fail the run; only missing data upstream does. The table
+/// always prints, and a clean check says so explicitly — correspondence
+/// never passes silently.
 fn report_correspondence(pair: &LayoutPair, names: &[String], current: u8) {
     for index in 0..=1u8 {
         let configured = pair.get(index).expect("pair holds indices 0 and 1");
         let actual = names.get(index as usize).cloned().unwrap_or_default();
         println!("  index {index}: niri \"{actual}\" <-> config \"{configured}\"");
     }
-    for finding in check_layouts(pair, names, current) {
+    let findings = check_layouts(pair, names, current);
+    if findings.is_empty() {
+        println!("  layouts: count and active index sit inside the pair (order is positional)");
+    }
+    for finding in findings {
         println!("  note: {finding}");
     }
 }
@@ -301,13 +327,25 @@ mod tests {
     #[test]
     fn count_mismatch_is_a_note_not_a_failure() {
         let findings = check_layouts(&pair(), &names(&["us", "ru", "de"]), 0);
-        assert_eq!(findings, vec![LayoutFinding::CountMismatch { actual: 3 }]);
+        assert_eq!(
+            findings,
+            vec![LayoutFinding::CountMismatch {
+                actual: 3,
+                pair: pair(),
+            }]
+        );
     }
 
     #[test]
     fn single_layout_is_just_a_count_note() {
         let findings = check_layouts(&pair(), &names(&["us"]), 0);
-        assert_eq!(findings, vec![LayoutFinding::CountMismatch { actual: 1 }]);
+        assert_eq!(
+            findings,
+            vec![LayoutFinding::CountMismatch {
+                actual: 1,
+                pair: pair(),
+            }]
+        );
     }
 
     #[test]
@@ -315,7 +353,9 @@ mod tests {
         let findings = check_layouts(&pair(), &names(&["us", "ru", "de"]), 2);
         assert!(findings.contains(&LayoutFinding::CurrentOutsidePair {
             current: 2,
-            count: 3
+            count: 3,
+            active: "de".to_string(),
+            pair: pair(),
         }));
     }
 
@@ -343,10 +383,22 @@ mod tests {
         let report = LayoutFinding::CurrentOutsidePair {
             current: 2,
             count: 3,
+            active: "de".to_string(),
+            pair: pair(),
         }
         .to_string();
         assert!(report.contains('2'), "{report}");
-        let report = LayoutFinding::CountMismatch { actual: 3 }.to_string();
+        assert!(report.contains("de"), "{report}");
+        assert!(report.contains("\"us\""), "{report}");
+        assert!(report.contains("\"ru\""), "{report}");
+        assert!(report.contains("third language"), "{report}");
+        let report = LayoutFinding::CountMismatch {
+            actual: 3,
+            pair: pair(),
+        }
+        .to_string();
         assert!(report.contains('3'), "{report}");
+        assert!(report.contains("\"us\""), "{report}");
+        assert!(report.contains("\"ru\""), "{report}");
     }
 }
