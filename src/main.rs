@@ -73,8 +73,7 @@ fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPla
         eprintln!("convert: layout switch failed: {error}");
         return false;
     }
-    if let Err(error) = ipc.wait_for_layout(plan.hop.target) {
-        eprintln!("convert: layout barrier failed: {error}");
+    if !wait_for_barrier(ipc, plan.hop.target) {
         return false;
     }
     if let Err(error) = injector.replay(&plan.replay) {
@@ -82,6 +81,29 @@ fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPla
         return false;
     }
     true
+}
+
+/// Wait for the layout barrier, recovering a dead event stream with
+/// backoff first (compositor restarts must not kill conversions).
+/// Returns true when the barrier is satisfied; every failure is logged.
+fn wait_for_barrier(ipc: &mut IpcClient, target: u8) -> bool {
+    match ipc.wait_for_layout(target) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("convert: event stream failed ({error}); reconnecting");
+            match ipc.recover_barrier(target) {
+                Ok(true) => true,
+                Ok(false) => {
+                    eprintln!("convert: layout {target} not active after reconnect");
+                    false
+                }
+                Err(error) => {
+                    eprintln!("convert: event stream recovery failed: {error}");
+                    false
+                }
+            }
+        }
+    }
 }
 
 /// Fresh conversion of `entries`, shared by gestures and bind requests.
@@ -171,10 +193,8 @@ fn apply_selection_plan(
         eprintln!("convert selection: {detail}");
         return Err(detail);
     }
-    if let Err(error) = ipc.wait_for_layout(plan.hop.target) {
-        let detail = format!("layout barrier failed: {error}");
-        eprintln!("convert selection: {detail}");
-        return Err(detail);
+    if !wait_for_barrier(ipc, plan.hop.target) {
+        return Err("layout barrier failed (see daemon log)".to_string());
     }
     if let Err(error) = injector.paste() {
         let detail = format!("paste failed: {error}");
@@ -325,10 +345,11 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
             std::process::exit(1);
         }
     };
-    let mut ipc = match IpcClient::connect() {
+    let mut ipc = match IpcClient::connect_with_retry() {
         Ok(ipc) => ipc,
         Err(error) => {
             eprintln!("niri IPC unavailable ($NIRI_SOCKET): {error}");
+            eprintln!("hint: retries ran out; the systemd unit restarts the daemon as a last resort");
             let _ = std::fs::remove_file(&socket_path);
             std::process::exit(1);
         }
@@ -350,9 +371,14 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     loop {
         match reader.poll(&input_dir, CONTROL_POLL) {
             reader::Poll::Gone => {
-                eprintln!("input: no devices left, exiting");
-                let _ = std::fs::remove_file(&socket_path);
-                std::process::exit(1);
+                // Evdev-missing path: keyboards unplugged or not yet
+                // present. Never exit here — hotplug rescans in poll pick
+                // up reappearing devices. Sleep to avoid spinning on a
+                // disconnected channel. (Distinct from the IPC-missing
+                // path above, which retries with backoff and only then
+                // exits for systemd to restart.)
+                eprintln!("input: no devices left; waiting for hotplug");
+                std::thread::sleep(CONTROL_POLL);
             }
             reader::Poll::Idle => {}
             reader::Poll::Key(raw) => {
