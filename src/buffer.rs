@@ -1,0 +1,157 @@
+//! Remembered input: a log of (scancode, shift) buffer entries.
+//!
+//! The daemon replays scancodes rather than characters, so the buffer stores
+//! raw scancodes plus whether Shift was held — everything a later replay
+//! needs, without any layout knowledge. Word boundaries are decided by the
+//! caller through a predicate, keeping this module free of key-code tables.
+
+/// One unit of remembered input: a raw scancode plus Shift state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BufferEntry {
+    /// Raw evdev key scancode (e.g. the code behind `KEY_A`).
+    pub scancode: u16,
+    /// Whether Shift was held when the key was pressed.
+    pub shift: bool,
+}
+
+/// Bounded log of buffer entries; oldest entries are evicted past capacity.
+pub struct InputBuffer {
+    entries: Vec<BufferEntry>,
+    capacity: usize,
+}
+
+/// Default bound: far more than any word or phrase replay needs.
+pub const DEFAULT_CAPACITY: usize = 256;
+
+impl InputBuffer {
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            entries: Vec::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    pub fn push(&mut self, entry: BufferEntry) {
+        if self.entries.len() >= self.capacity {
+            let overflow = self.entries.len() - self.capacity + 1;
+            self.entries.drain(..overflow);
+        }
+        self.entries.push(entry);
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn entries(&self) -> &[BufferEntry] {
+        &self.entries
+    }
+
+    /// Entries since the last boundary (the current word): the suffix after
+    /// the most recent entry matching `is_boundary`.
+    pub fn trailing_word(&self, is_boundary: impl Fn(u16) -> bool) -> &[BufferEntry] {
+        let cut = self
+            .entries
+            .iter()
+            .rposition(|e| is_boundary(e.scancode))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        &self.entries[cut..]
+    }
+}
+
+impl Default for InputBuffer {
+    fn default() -> Self {
+        Self::new(DEFAULT_CAPACITY)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(scancode: u16) -> BufferEntry {
+        BufferEntry {
+            scancode,
+            shift: false,
+        }
+    }
+
+    const SPACE: u16 = 57; // stand-in boundary scancode for tests
+
+    fn is_boundary(code: u16) -> bool {
+        code == SPACE
+    }
+
+    #[test]
+    fn empty_buffer_has_no_word() {
+        let buf = InputBuffer::default();
+        assert_eq!(buf.len(), 0);
+        assert_eq!(buf.trailing_word(is_boundary), &[]);
+    }
+
+    #[test]
+    fn word_is_suffix_after_last_boundary() {
+        let mut buf = InputBuffer::default();
+        for code in [30, 48, SPACE, 31, 32] {
+            buf.push(entry(code));
+        }
+        let word: Vec<u16> = buf
+            .trailing_word(is_boundary)
+            .iter()
+            .map(|e| e.scancode)
+            .collect();
+        assert_eq!(word, vec![31, 32]);
+    }
+
+    #[test]
+    fn whole_buffer_is_word_without_boundary() {
+        let mut buf = InputBuffer::default();
+        for code in [30, 48, 31] {
+            buf.push(entry(code));
+        }
+        assert_eq!(buf.trailing_word(is_boundary).len(), 3);
+    }
+
+    #[test]
+    fn trailing_boundary_means_empty_word() {
+        let mut buf = InputBuffer::default();
+        for code in [30, SPACE] {
+            buf.push(entry(code));
+        }
+        assert_eq!(buf.trailing_word(is_boundary), &[]);
+        assert_eq!(buf.len(), 2); // history kept for phrase scope
+    }
+
+    #[test]
+    fn shift_flag_is_preserved() {
+        let mut buf = InputBuffer::default();
+        buf.push(BufferEntry {
+            scancode: 30,
+            shift: true,
+        });
+        assert!(buf.entries()[0].shift);
+    }
+
+    #[test]
+    fn capacity_evicts_oldest() {
+        let mut buf = InputBuffer::new(3);
+        for code in [10, 11, 12, 13] {
+            buf.push(entry(code));
+        }
+        let codes: Vec<u16> = buf.entries().iter().map(|e| e.scancode).collect();
+        assert_eq!(codes, vec![11, 12, 13]);
+    }
+
+    #[test]
+    fn clear_empties() {
+        let mut buf = InputBuffer::default();
+        buf.push(entry(30));
+        buf.clear();
+        assert_eq!(buf.len(), 0);
+    }
+}
