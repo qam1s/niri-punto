@@ -7,7 +7,9 @@
 //!
 //! [`event_is_layout`] is pure and unit-tested; the rest needs a compositor.
 
-use niri_ipc::{Action, Event, LayoutSwitchTarget, Request, Response, socket::Socket};
+use niri_ipc::{
+    Action, Event, KeyboardLayouts, LayoutSwitchTarget, Request, Response, socket::Socket,
+};
 use std::io;
 
 /// Client holding the request socket and the event-stream reader.
@@ -43,12 +45,11 @@ impl IpcClient {
         })
     }
 
-    /// Current layout index and configured layout count.
-    pub fn current_layout(&mut self) -> io::Result<(u8, usize)> {
+    /// Full layout state: names in index order plus the current index.
+    /// [`current_layout`] is the index/count projection `doctor` reports.
+    pub fn layouts(&mut self) -> io::Result<KeyboardLayouts> {
         match self.requests.send(Request::KeyboardLayouts) {
-            Ok(Ok(Response::KeyboardLayouts(layouts))) => {
-                Ok((layouts.current_idx, layouts.names.len()))
-            }
+            Ok(Ok(Response::KeyboardLayouts(layouts))) => Ok(layouts),
             Ok(Ok(_)) => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "niri answered KeyboardLayouts with an unexpected response",
@@ -58,6 +59,12 @@ impl IpcClient {
             ))),
             Err(error) => Err(error),
         }
+    }
+
+    /// Current layout index and configured layout count.
+    pub fn current_layout(&mut self) -> io::Result<(u8, usize)> {
+        let layouts = self.layouts()?;
+        Ok((layouts.current_idx, layouts.names.len()))
     }
 
     /// Switch to `index` by explicit index. Rejects out-of-range u8 upstream;

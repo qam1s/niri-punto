@@ -8,9 +8,10 @@
 //! The undo-chain shape mirrors [`crate::convert::Converter`]: a fresh
 //! gesture plans a conversion and remembers it; a repeated gesture undoes the
 //! remembered step and keeps the reversed step, so a third repeat redoes.
-//! The layout error reuses [`crate::convert::ConversionError`], including the
-//! hardcoded two-layout assumption (ticket 11 configures the pair).
+//! The layout error reuses [`crate::convert::ConversionError`] with the same
+//! pair semantics: outside the configured pair is refused loudly.
 
+use crate::config::LayoutPair;
 use crate::convert::ConversionError;
 use crate::keymaps;
 
@@ -40,20 +41,24 @@ impl SelectionPlan {
 }
 
 /// Plan a conversion of the selected `text` from layout `current` to the
-/// other layout of the two-layout setup. The current layout names the source
-/// alphabet: US text maps EN->RU, RU text maps RU->EN.
+/// other layout of the configured `pair`. The current layout names the source
+/// alphabet: text in the first layout maps to the second, text in the second
+/// maps back. Pair order is the contract: the first entry is the Latin side,
+/// the second the Cyrillic side (see the `layouts` config).
 pub fn plan_selection(
     text: &str,
     current: u8,
     layout_count: usize,
+    pair: &LayoutPair,
 ) -> Result<SelectionPlan, ConversionError> {
     if text.is_empty() {
         return Err(ConversionError::Empty);
     }
-    if layout_count != 2 || current > 1 {
+    if current > 1 || layout_count < 2 {
         return Err(ConversionError::Layouts {
             current,
             count: layout_count,
+            pair: pair.clone(),
         });
     }
     Ok(SelectionPlan {
@@ -69,11 +74,12 @@ pub fn plan_selection(
 /// call [`SelectionConverter::invalidate`].
 pub struct SelectionConverter {
     last: Option<SelectionPlan>,
+    pair: LayoutPair,
 }
 
 impl SelectionConverter {
-    pub fn new() -> Self {
-        Self { last: None }
+    pub fn new(pair: LayoutPair) -> Self {
+        Self { last: None, pair }
     }
 
     /// Plan a fresh conversion and remember it for a later undo.
@@ -83,7 +89,7 @@ impl SelectionConverter {
         current: u8,
         layout_count: usize,
     ) -> Result<SelectionPlan, ConversionError> {
-        let plan = plan_selection(text, current, layout_count)?;
+        let plan = plan_selection(text, current, layout_count, &self.pair)?;
         self.last = Some(plan.clone());
         Ok(plan)
     }
@@ -110,7 +116,7 @@ impl SelectionConverter {
 
 impl Default for SelectionConverter {
     fn default() -> Self {
-        Self::new()
+        Self::new(LayoutPair::new("us", "ru").expect("us/ru is a valid pair"))
     }
 }
 
@@ -118,9 +124,13 @@ impl Default for SelectionConverter {
 mod tests {
     use super::*;
 
+    fn pair() -> LayoutPair {
+        LayoutPair::new("us", "ru").unwrap()
+    }
+
     #[test]
     fn selection_plans_converted_text_and_other_index() {
-        let plan = plan_selection("ghbdtn", 0, 2).unwrap();
+        let plan = plan_selection("ghbdtn", 0, 2, &pair()).unwrap();
         assert_eq!(plan.converted, "привет");
         assert_eq!(plan.original, "ghbdtn");
         assert_eq!((plan.from_index, plan.target_index), (0, 1));
@@ -128,29 +138,36 @@ mod tests {
 
     #[test]
     fn selection_from_second_layout_maps_back() {
-        let plan = plan_selection("привет", 1, 2).unwrap();
+        let plan = plan_selection("привет", 1, 2, &pair()).unwrap();
         assert_eq!(plan.converted, "ghbdtn");
         assert_eq!((plan.from_index, plan.target_index), (1, 0));
     }
 
     #[test]
     fn non_latin_selection_survives() {
-        let plan = plan_selection("ghbdtn 👋", 0, 2).unwrap();
+        let plan = plan_selection("ghbdtn 👋", 0, 2, &pair()).unwrap();
         assert_eq!(plan.converted, "привет 👋");
     }
 
     #[test]
     fn empty_selection_is_refused() {
-        assert_eq!(plan_selection("", 0, 2), Err(ConversionError::Empty));
+        assert_eq!(plan_selection("", 0, 2, &pair()), Err(ConversionError::Empty));
     }
 
     #[test]
-    fn non_pair_layout_count_is_refused() {
+    fn extra_layouts_inside_pair_convert() {
+        let plan = plan_selection("ghbdtn", 0, 3, &pair()).unwrap();
+        assert_eq!((plan.from_index, plan.target_index), (0, 1));
+    }
+
+    #[test]
+    fn single_layout_is_refused() {
         assert_eq!(
-            plan_selection("ghbdtn", 0, 3),
+            plan_selection("ghbdtn", 0, 1, &pair()),
             Err(ConversionError::Layouts {
                 current: 0,
-                count: 3
+                count: 1,
+                pair: pair(),
             })
         );
     }
@@ -158,17 +175,18 @@ mod tests {
     #[test]
     fn out_of_range_current_index_is_refused() {
         assert_eq!(
-            plan_selection("ghbdtn", 5, 2),
+            plan_selection("ghbdtn", 5, 2, &pair()),
             Err(ConversionError::Layouts {
                 current: 5,
-                count: 2
+                count: 2,
+                pair: pair(),
             })
         );
     }
 
     #[test]
     fn undo_swaps_texts_and_hop() {
-        let plan = plan_selection("ghbdtn", 0, 2).unwrap();
+        let plan = plan_selection("ghbdtn", 0, 2, &pair()).unwrap();
         let back = plan.reversed();
         assert_eq!((back.from_index, back.target_index), (1, 0));
         assert_eq!(back.converted, "ghbdtn");
@@ -177,7 +195,7 @@ mod tests {
 
     #[test]
     fn converter_undo_chain_toggles_convert_undo_redo() {
-        let mut converter = SelectionConverter::new();
+        let mut converter = SelectionConverter::new(pair());
         let forward = converter.convert("ghbdtn", 0, 2).unwrap();
         assert!(converter.has_pending_undo());
 
@@ -190,7 +208,7 @@ mod tests {
 
     #[test]
     fn typing_between_invalidates_the_pending_undo() {
-        let mut converter = SelectionConverter::new();
+        let mut converter = SelectionConverter::new(pair());
         converter.convert("ghbdtn", 0, 2).unwrap();
         converter.invalidate();
         assert!(!converter.has_pending_undo());
@@ -199,14 +217,14 @@ mod tests {
 
     #[test]
     fn failed_conversion_leaves_no_pending_undo() {
-        let mut converter = SelectionConverter::new();
+        let mut converter = SelectionConverter::new(pair());
         assert!(converter.convert("", 0, 2).is_err());
         assert!(!converter.has_pending_undo());
     }
 
     #[test]
     fn fresh_conversion_overwrites_the_remembered_step() {
-        let mut converter = SelectionConverter::new();
+        let mut converter = SelectionConverter::new(pair());
         converter.convert("ghbdtn", 0, 2).unwrap();
         let plan = converter.convert("lvdk", 0, 2).unwrap();
         assert_eq!(plan.converted, "дмвл");

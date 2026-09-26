@@ -12,16 +12,22 @@
 //! buffer) through shared convert helpers, and the `run` daemon also serves
 //! `convert-word` / `convert-selection` requests from niri binds over its
 //! control socket.
+//! Ticket 11 (setup + doctor): `setup` installs the binary, user unit,
+//! default KDL config, and the udev rule; `doctor` checks devices,
+//! permissions, socket, and layouts; the daemon loads the layout pair.
 
 mod buffer;
 mod clipboard;
+mod config;
 mod control;
 mod convert;
+mod doctor;
 mod inject;
 mod ipc;
 mod keymaps;
 mod reader;
 mod selection;
+mod setup;
 mod trigger;
 
 use buffer::{BufferEntry, InputBuffer};
@@ -41,9 +47,11 @@ const CONTROL_POLL: Duration = Duration::from_millis(100);
 
 fn usage() -> ! {
     eprintln!("usage: niri-punto <command> [options]");
-    eprintln!("  run [--input-dir DIR]  start the daemon (single instance)");
+    eprintln!("  run [--input-dir DIR] [--config PATH]  start the daemon (single instance)");
     eprintln!("  convert-word           ask the running daemon to convert the last word");
     eprintln!("  convert-selection      ask the running daemon to convert the selection");
+    eprintln!("  setup [--no-udev] [--dry-run]  install binary, unit, config, udev rule");
+    eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("Double Shift converts the word, Shift+DoubleShift the phrase;");
     eprintln!("niri binds (e.g. Mod+L) use the convert-* subcommands.");
     std::process::exit(2);
@@ -163,27 +171,55 @@ fn apply_selection_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &Sel
 
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    // The ticket 08 invocation without a subcommand still starts the daemon.
+    // The bare invocation still starts the daemon.
     let (command, rest) = match raw.first().map(String::as_str) {
-        None | Some("--input-dir") => ("run", raw.as_slice()),
-        Some("run") | Some("convert-word") | Some("convert-selection") => {
-            (raw[0].as_str(), &raw[1..])
-        }
+        None | Some("--input-dir") | Some("--config") => ("run", raw.as_slice()),
+        Some("run") | Some("convert-word") | Some("convert-selection") | Some("setup")
+        | Some("doctor") => (raw[0].as_str(), &raw[1..]),
         _ => usage(),
     };
     match command {
+        "setup" => {
+            let mut options = setup::Options::default();
+            for arg in rest {
+                match arg.as_str() {
+                    "--no-udev" => options.no_udev = true,
+                    "--dry-run" => options.dry_run = true,
+                    _ => usage(),
+                }
+            }
+            let paths = match setup::resolve() {
+                Ok(paths) => paths,
+                Err(error) => {
+                    eprintln!("setup: {error}");
+                    std::process::exit(1);
+                }
+            };
+            std::process::exit(setup::run(options, &paths, &setup::RealRunner));
+        }
+        "doctor" => {
+            if !rest.is_empty() {
+                usage();
+            }
+            std::process::exit(doctor::run());
+        }
         "run" => {
             let mut input_dir = PathBuf::from("/dev/input");
+            let mut config_override: Option<PathBuf> = None;
             let mut rest = rest.iter();
             while let Some(arg) = rest.next() {
                 match arg.as_str() {
                     "--input-dir" => {
                         input_dir = rest.next().map(PathBuf::from).unwrap_or_else(|| usage());
                     }
+                    "--config" => {
+                        config_override =
+                            Some(rest.next().map(PathBuf::from).unwrap_or_else(|| usage()));
+                    }
                     _ => usage(),
                 }
             }
-            run(input_dir);
+            run(input_dir, config_override);
         }
         "convert-word" => {
             if !rest.is_empty() {
@@ -220,7 +256,7 @@ fn client(kind: ControlKind) {
     }
 }
 
-fn run(input_dir: PathBuf) {
+fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     // Single-instance guard first: a live socket means another daemon owns
     // the input, so exit before touching hardware.
     let socket_path = control::socket_path();
@@ -250,6 +286,19 @@ fn run(input_dir: PathBuf) {
         eprintln!("control: listener thread failed; binds will not work");
     }
 
+    let pair = match config_override {
+        Some(path) => config::load_from(&path),
+        None => config::load(),
+    };
+    let pair = match pair {
+        Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("config: {error}");
+            eprintln!("hint: run `niri-punto setup` to write the default config");
+            std::process::exit(1);
+        }
+    };
+
     let mut injector = match Injector::open() {
         Ok(injector) => injector,
         Err(error) => {
@@ -275,8 +324,8 @@ fn run(input_dir: PathBuf) {
     let start = Instant::now();
     let mut triggers = TriggerMachine::new();
     let mut buffer = InputBuffer::default();
-    let mut converter = Converter::new();
-    let mut selection_converter = SelectionConverter::new();
+    let mut converter = Converter::new(pair);
+    let mut selection_converter = SelectionConverter::new(pair.clone());
 
     loop {
         match reader.poll(&input_dir, CONTROL_POLL) {
