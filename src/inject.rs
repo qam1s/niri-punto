@@ -65,6 +65,32 @@ pub fn replay_strokes(entries: &[BufferEntry]) -> Vec<KeyStroke> {
     out
 }
 
+/// Press/release pairs for Ctrl+V: paste the clipboard over the selection.
+/// The selection path publishes the converted text with `wl-copy` first, so
+/// a plain Ctrl+V replaces the highlighted text with it.
+pub fn paste_strokes() -> Vec<KeyStroke> {
+    let ctrl = KeyCode::KEY_LEFTCTRL.code();
+    let paste = KeyCode::KEY_V.code();
+    vec![
+        KeyStroke {
+            scancode: ctrl,
+            value: 1,
+        },
+        KeyStroke {
+            scancode: paste,
+            value: 1,
+        },
+        KeyStroke {
+            scancode: paste,
+            value: 0,
+        },
+        KeyStroke {
+            scancode: ctrl,
+            value: 0,
+        },
+    ]
+}
+
 /// Virtual keyboard that emits corrections. Open once, reuse across gestures.
 pub struct Injector {
     device: VirtualDevice,
@@ -102,6 +128,12 @@ impl Injector {
     /// after the layout-changed barrier fired.
     pub fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()> {
         self.emit_all(&replay_strokes(entries))
+    }
+
+    /// Paste the clipboard (published via `wl-copy`) over the selection.
+    /// Call only after the layout-changed barrier fired.
+    pub fn paste(&mut self) -> io::Result<()> {
+        self.emit_all(&paste_strokes())
     }
 }
 
@@ -243,5 +275,32 @@ mod tests {
     #[test]
     fn replay_empty_emits_nothing() {
         assert!(replay_strokes(&[]).is_empty());
+    }
+
+    #[test]
+    fn paste_emits_ctrl_v_tap() {
+        let ctrl = KeyCode::KEY_LEFTCTRL.code();
+        let paste = KeyCode::KEY_V.code();
+        assert_eq!(
+            paste_strokes(),
+            vec![
+                KeyStroke {
+                    scancode: ctrl,
+                    value: 1
+                },
+                KeyStroke {
+                    scancode: paste,
+                    value: 1
+                },
+                KeyStroke {
+                    scancode: paste,
+                    value: 0
+                },
+                KeyStroke {
+                    scancode: ctrl,
+                    value: 0
+                },
+            ]
+        );
     }
 }
