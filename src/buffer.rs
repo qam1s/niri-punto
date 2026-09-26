@@ -66,6 +66,13 @@ impl InputBuffer {
             .unwrap_or(0);
         &self.entries[cut..]
     }
+
+    /// Whole-buffer scope for phrase conversion: everything remembered
+    /// since the last [`clear`](Self::clear), including word boundaries.
+    /// Bounded by Esc-clear and capacity eviction, never by word edges.
+    pub fn phrase(&self) -> &[BufferEntry] {
+        &self.entries
+    }
 }
 
 impl Default for InputBuffer {
@@ -129,6 +136,36 @@ mod tests {
         }
         assert_eq!(buf.trailing_word(is_boundary), &[]);
         assert_eq!(buf.len(), 2); // history kept for phrase scope
+    }
+
+    #[test]
+    fn phrase_covers_whole_buffer_across_word_boundaries() {
+        let mut buf = InputBuffer::default();
+        for code in [30, 48, SPACE, 31, 32] {
+            buf.push(entry(code));
+        }
+        // The word scope sees only the suffix; the phrase scope everything.
+        assert_eq!(buf.trailing_word(is_boundary).len(), 2);
+        let phrase: Vec<u16> = buf.phrase().iter().map(|e| e.scancode).collect();
+        assert_eq!(phrase, vec![30, 48, SPACE, 31, 32]);
+    }
+
+    #[test]
+    fn phrase_keeps_trailing_boundary_for_full_replay() {
+        let mut buf = InputBuffer::default();
+        for code in [30, SPACE] {
+            buf.push(entry(code));
+        }
+        assert_eq!(buf.trailing_word(is_boundary), &[]);
+        assert_eq!(buf.phrase().len(), 2);
+    }
+
+    #[test]
+    fn phrase_is_empty_after_clear() {
+        let mut buf = InputBuffer::default();
+        buf.push(entry(30));
+        buf.clear();
+        assert_eq!(buf.phrase(), &[]);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Name of the daemon's own virtual device (created from the next ticket
 /// on, when injection lands). Anything with this name is never opened.
@@ -150,6 +150,14 @@ pub struct Reader {
     tx: Sender<DeviceMsg>,
     rx: Receiver<DeviceMsg>,
     live: HashSet<PathBuf>,
+    last_rescan: Instant,
+}
+
+/// One short-poll outcome: a key, idle (try again), or every device gone.
+pub enum Poll {
+    Key(RawKey),
+    Idle,
+    Gone,
 }
 
 impl Reader {
@@ -159,32 +167,40 @@ impl Reader {
             tx,
             rx,
             live: HashSet::new(),
+            last_rescan: Instant::now(),
         };
         let tx = reader.tx.clone();
         reader.rescan(input_dir, &tx);
         reader
     }
 
-    /// Wait for the next key transition, rescanning for hotplug arrivals
-    /// while idle. Returns `None` only when every device is gone and no
-    /// new one appears.
-    pub fn next_key(&mut self, input_dir: &Path) -> Option<RawKey> {
-        loop {
-            match self.rx.recv_timeout(RESCAN_INTERVAL) {
-                Ok(DeviceMsg::Key(key)) => return Some(key),
-                Ok(DeviceMsg::Disconnected(path)) => {
-                    self.live.remove(&path);
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
+    /// Wait up to `timeout` for one key transition so the caller can
+    /// multiplex other work (control-socket requests) between polls.
+    /// Hotplug rescans run at most every [`RESCAN_INTERVAL`], except after
+    /// a device disconnect, which always rescans immediately.
+    pub fn poll(&mut self, input_dir: &Path, timeout: Duration) -> Poll {
+        match self.rx.recv_timeout(timeout) {
+            Ok(DeviceMsg::Key(key)) => Poll::Key(key),
+            Ok(DeviceMsg::Disconnected(path)) => {
+                self.live.remove(&path);
+                Poll::Idle
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if self.last_rescan.elapsed() >= RESCAN_INTERVAL {
                     let tx = self.tx.clone();
                     self.rescan(input_dir, &tx);
+                    self.last_rescan = Instant::now();
                 }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let tx = self.tx.clone();
-                    self.rescan(input_dir, &tx);
-                    if self.live.is_empty() {
-                        return None;
-                    }
+                Poll::Idle
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                let tx = self.tx.clone();
+                self.rescan(input_dir, &tx);
+                self.last_rescan = Instant::now();
+                if self.live.is_empty() {
+                    Poll::Gone
+                } else {
+                    Poll::Idle
                 }
             }
         }
