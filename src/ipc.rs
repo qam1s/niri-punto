@@ -41,6 +41,8 @@ pub trait LayoutBackend {
     /// Re-establish a dead event stream, then check `target`. See
     /// [`IpcClient::recover_barrier`].
     fn recover_barrier(&mut self, target: u8) -> io::Result<bool>;
+    /// Id of the focused window, or `None` when no window has focus.
+    fn focused_window_id(&mut self) -> io::Result<Option<u64>>;
 }
 
 /// Client holding the request socket and the event-stream reader.
@@ -106,6 +108,22 @@ impl LayoutBackend for IpcClient {
     fn current_layout(&mut self) -> io::Result<(u8, usize)> {
         let layouts = self.layouts()?;
         Ok((layouts.current_idx, layouts.names.len()))
+    }
+
+    /// Id of the focused window (`None` on an empty workspace): the daemon
+    /// scopes the input buffer to one window, so a focus change clears it.
+    fn focused_window_id(&mut self) -> io::Result<Option<u64>> {
+        match self.requests.send(Request::FocusedWindow) {
+            Ok(Ok(Response::FocusedWindow(window))) => Ok(window.map(|w| w.id)),
+            Ok(Ok(_)) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "niri answered FocusedWindow with an unexpected response",
+            )),
+            Ok(Err(message)) => Err(io::Error::other(format!(
+                "niri reported an error: {message}"
+            ))),
+            Err(error) => Err(error),
+        }
     }
 
     /// Switch to `index` by explicit index. Rejects out-of-range u8 upstream;
