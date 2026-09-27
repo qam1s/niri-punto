@@ -1,0 +1,15 @@
+# License/advisory policy for `cargo deny check`.
+# Allowed licenses mirror the current Cargo.lock inventory; update the
+# list when a dependency introduces a new license.
+
+[advisories]
+yanked = "warn"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unlicense",
+    "Unicode-3.0",
+    "GPL-3.0-or-later",
+]
