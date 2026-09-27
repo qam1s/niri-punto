@@ -27,6 +27,10 @@ mod inject;
 mod ipc;
 mod keymaps;
 mod reader;
+// Bigram scorer for the detector seam: not consulted by any path yet, so
+// the module stays allow(dead_code) until the direction verdict lands.
+#[allow(dead_code)]
+mod scorer;
 mod selection;
 mod setup;
 mod trigger;
