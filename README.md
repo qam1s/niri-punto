@@ -73,6 +73,12 @@ timings {
 }
 ```
 
+## Development
+
+`just test` runs the test suite, `just lint` runs clippy and fmt checks.
+Install the pre-commit hooks once per clone with `prek install`.
+CI additionally runs `typos` and `cargo deny check advisories licenses`.
+
 ## License
 
 GPL-3.0-or-later [LICENSE](LICENSE).
