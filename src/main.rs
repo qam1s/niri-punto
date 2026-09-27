@@ -386,7 +386,7 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     let start = Instant::now();
     let mut triggers = TriggerMachine::new();
     triggers.set_tap(settings.tap);
-    triggers.set_chords(settings.chords);
+    triggers.set_binds(settings.binds);
     triggers.set_timing(settings.timing);
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new(pair.clone());
@@ -559,13 +559,13 @@ fn handle_key_at(
     } = daemon;
     let key = reader::classify(raw.scancode);
 
-    // Daemon-side chords (config `chord` lines): Meta held + key press.
-    // The chord key is the trigger, not text: unlike niri-bind keys it
-    // skips the buffer, so the converted scope stays exact.
-    let chord = (raw.value == 1 && triggers.meta_held())
-        .then(|| triggers.chord(raw.scancode, now_ms))
+    // Daemon-side binds (config `binds` block): the bind key is the
+    // trigger, not text — unlike niri-bind keys it skips the buffer, so
+    // the converted scope stays exact.
+    let bind = (raw.value == 1)
+        .then(|| triggers.bind(raw.scancode, now_ms))
         .flatten();
-    if let Some(gesture) = chord {
+    if let Some(gesture) = bind {
         // Latest gesture wins: it supersedes anything still waiting.
         *pending = Some(triggers.stage(gesture, now_ms));
     } else if reader::is_typing_key(key, raw.value) {
@@ -704,7 +704,7 @@ mod tests {
     use super::*;
     use crate::buffer::BufferEntry;
     use crate::config::LayoutPair;
-    use crate::trigger::Chord;
+    use crate::trigger::{Bind, ModSet};
     use evdev::KeyCode;
     use std::io;
 
@@ -978,13 +978,21 @@ mod tests {
         assert_eq!(h.injector.erases, vec![6]);
     }
 
-    #[test]
-    fn chord_converts_word_with_exact_scope() {
-        let mut h = Harness::new();
-        h.triggers.set_chords(vec![Chord {
+    fn mod_l(m: &mut TriggerMachine) {
+        m.set_binds(vec![Bind {
+            mods: ModSet {
+                meta: true,
+                ..Default::default()
+            },
             scancode: 38,
             kind: GestureKind::Word,
         }]);
+    }
+
+    #[test]
+    fn bind_converts_word_with_exact_scope() {
+        let mut h = Harness::new();
+        mod_l(&mut h.triggers);
         h.type_word(T);
         h.at(T + 500, SUPER, 1);
         h.at(T + 550, 38, 1);
@@ -998,12 +1006,9 @@ mod tests {
     }
 
     #[test]
-    fn repeated_chord_undoes() {
+    fn repeated_bind_undoes() {
         let mut h = Harness::new();
-        h.triggers.set_chords(vec![Chord {
-            scancode: 38,
-            kind: GestureKind::Word,
-        }]);
+        mod_l(&mut h.triggers);
         h.type_word(T);
         h.at(T + 500, SUPER, 1);
         h.at(T + 550, 38, 1);

@@ -12,7 +12,7 @@
 //! environment.
 
 use crate::reader;
-use crate::trigger::{Chord, GestureKind, TapMode, TimingConfig};
+use crate::trigger::{Bind, GestureKind, ModSet, TapMode, TimingConfig};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -24,9 +24,11 @@ pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pai
 layouts "us" "ru"
 // Lone Mod tap trigger: "meta" converts on tap, "off" disables it.
 tap "meta"
-// Daemon-side chords (Meta held + key): no niri binds needed. Examples:
-// chord "meta+l" "word"
-// chord "meta+s" "selection"
+// Daemon-side binds in niri style: no niri binds needed. Examples:
+// binds {
+//     Mod+L word
+//     Mod+S selection
+// }
 // Trigger timings in milliseconds: absent keys mean these defaults.
 timings {
     double-shift-ms 400
@@ -95,8 +97,8 @@ pub enum ConfigError {
     Duplicate(String),
     /// The `tap` node is repeated or holds a bad value.
     BadTap(String),
-    /// A `chord` node is malformed (combo or action).
-    BadChord(String),
+    /// A `binds` entry is malformed (combo or action).
+    BadBind(String),
     /// The `timings` block is malformed (keys or values).
     BadTimings(String),
     /// File I/O failed (missing file, permissions).
@@ -118,7 +120,7 @@ impl fmt::Display for ConfigError {
             Self::EmptyCode => write!(f, "layout codes must be non-empty"),
             Self::Duplicate(code) => write!(f, "layout codes must differ, both are \"{code}\""),
             Self::BadTap(message) => write!(f, "bad `tap` node: {message}"),
-            Self::BadChord(message) => write!(f, "bad `chord` node: {message}"),
+            Self::BadBind(message) => write!(f, "bad bind: {message}"),
             Self::BadTimings(message) => write!(f, "bad `timings` block: {message}"),
             Self::Io(message) => write!(f, "{message}"),
         }
@@ -177,7 +179,7 @@ pub fn parse(text: &str) -> Result<LayoutPair, ConfigError> {
 #[derive(Clone, PartialEq, Eq, Debug, Default)]
 pub struct TriggerSettings {
     pub tap: TapMode,
-    pub chords: Vec<Chord>,
+    pub binds: Vec<Bind>,
     pub timing: TimingConfig,
 }
 
@@ -189,6 +191,7 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
     let mut settings = TriggerSettings::default();
     let mut tap_seen = false;
     let mut timings_seen = false;
+    let mut binds_seen = false;
     for node in document.nodes() {
         match node.name().value() {
             "tap" => {
@@ -200,7 +203,22 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
                 tap_seen = true;
                 settings.tap = parse_tap(node)?;
             }
-            "chord" => settings.chords.push(parse_chord(node)?),
+            "binds" => {
+                if binds_seen {
+                    return Err(ConfigError::BadBind(
+                        "more than one `binds` block: keep exactly one".to_string(),
+                    ));
+                }
+                binds_seen = true;
+                settings.binds = parse_binds(node)?;
+            }
+            // `chord` lines died in favor of the `binds` block: fail loudly
+            // instead of silently dropping the user's triggers.
+            "chord" => {
+                return Err(ConfigError::BadBind(
+                    "`chord` lines were replaced by the `binds` block (e.g. `binds { Mod+L word }`)".to_string(),
+                ));
+            }
             "timings" => {
                 if timings_seen {
                     return Err(ConfigError::BadTimings(
@@ -240,26 +258,64 @@ fn parse_tap(node: &kdl::KdlNode) -> Result<TapMode, ConfigError> {
     }
 }
 
-fn parse_chord(node: &kdl::KdlNode) -> Result<Chord, ConfigError> {
-    let (combo, action) = match node_args(node).as_deref() {
-        Some([combo, action]) => (*combo, *action),
-        _ => {
-            return Err(ConfigError::BadChord(
-                "want a combo and an action (e.g. `chord \"meta+l\" \"word\"`)".to_string(),
-            ));
+fn parse_binds(node: &kdl::KdlNode) -> Result<Vec<Bind>, ConfigError> {
+    if !node.entries().is_empty() {
+        return Err(ConfigError::BadBind(
+            "the block takes no arguments, only `Combo action` lines".to_string(),
+        ));
+    }
+    let mut binds = Vec::new();
+    if let Some(children) = node.children() {
+        for child in children.nodes() {
+            binds.push(parse_bind(child)?);
         }
-    };
-    let name = match combo.split_once('+') {
-        Some(("meta", name)) => name,
+    }
+    Ok(binds)
+}
+
+/// One bind: the node name is the niri-style combo (`Mod+L`,
+/// `Mod+Shift+P`), the single argument is the action.
+fn parse_bind(node: &kdl::KdlNode) -> Result<Bind, ConfigError> {
+    let action = match node_args(node).as_deref() {
+        Some([action]) => *action,
         _ => {
-            return Err(ConfigError::BadChord(format!(
-                "bad combo {combo:?}: want `meta+<key>`"
+            return Err(ConfigError::BadBind(format!(
+                "{:?} wants exactly one action (`word`, `phrase`, or `selection`)",
+                node.name().value()
             )));
         }
     };
-    let Some(scancode) = reader::scancode_by_name(name) else {
-        return Err(ConfigError::BadChord(format!(
-            "unknown key {name:?}: want a letter or digit"
+    let combo = node.name().value();
+    let mut parts: Vec<&str> = combo.split('+').collect();
+    let Some(key) = parts.pop() else {
+        return Err(ConfigError::BadBind(format!("bad combo {combo:?}")));
+    };
+    let mut mods = ModSet::default();
+    for part in &parts {
+        match part.to_lowercase().as_str() {
+            "mod" => mods.meta = true,
+            "shift" => mods.shift = true,
+            "ctrl" => mods.ctrl = true,
+            "alt" => {
+                return Err(ConfigError::BadBind(
+                    "alt binds need Alt tracking, which is not implemented yet".to_string(),
+                ));
+            }
+            _ => {
+                return Err(ConfigError::BadBind(format!(
+                    "bad modifier {part:?} in {combo:?}: want `Mod`, `Shift`, or `Ctrl`"
+                )));
+            }
+        }
+    }
+    if !mods.any() {
+        return Err(ConfigError::BadBind(format!(
+            "bad combo {combo:?}: need at least one modifier (e.g. `Mod+L`)"
+        )));
+    }
+    let Some(scancode) = reader::scancode_by_name(&key.to_lowercase()) else {
+        return Err(ConfigError::BadBind(format!(
+            "unknown key {key:?} in {combo:?}: want a letter or digit"
         )));
     };
     let kind = match action {
@@ -267,12 +323,16 @@ fn parse_chord(node: &kdl::KdlNode) -> Result<Chord, ConfigError> {
         "phrase" => GestureKind::Phrase,
         "selection" => GestureKind::Selection,
         _ => {
-            return Err(ConfigError::BadChord(format!(
+            return Err(ConfigError::BadBind(format!(
                 "bad action {action:?}: want `word`, `phrase`, or `selection`"
             )));
         }
     };
-    Ok(Chord { scancode, kind })
+    Ok(Bind {
+        mods,
+        scancode,
+        kind,
+    })
 }
 
 /// Exactly one positional integer argument, no properties.
@@ -402,7 +462,7 @@ fn with_path(path: &Path, error: ConfigError) -> ConfigError {
         | ConfigError::EmptyCode
         | ConfigError::Duplicate(_)
         | ConfigError::BadTap(_)
-        | ConfigError::BadChord(_)
+        | ConfigError::BadBind(_)
         | ConfigError::BadTimings(_) => ConfigError::Io(format!("{}: {error}", path.display())),
         ConfigError::Io(_) => error,
     }
@@ -520,17 +580,17 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_to_tap_on_without_chords() {
+    fn settings_default_to_tap_on_without_binds() {
         let settings = parse_settings("layouts \"us\" \"ru\"\n").unwrap();
         assert_eq!(settings.tap, TapMode::Meta);
-        assert!(settings.chords.is_empty());
+        assert!(settings.binds.is_empty());
     }
 
     #[test]
     fn default_config_settings_parse() {
         let settings = parse_settings(DEFAULT_CONFIG).unwrap();
         assert_eq!(settings.tap, TapMode::Meta);
-        assert!(settings.chords.is_empty());
+        assert!(settings.binds.is_empty());
     }
 
     #[test]
@@ -548,33 +608,50 @@ mod tests {
     }
 
     #[test]
-    fn chords_parse_all_actions() {
+    fn binds_parse_all_actions() {
         let settings = parse_settings(
-            "layouts \"us\" \"ru\"\nchord \"meta+l\" \"word\"\nchord \"meta+s\" \"selection\"\nchord \"meta+p\" \"phrase\"\n",
+            "layouts \"us\" \"ru\"\nbinds {\n Mod+L word\n Mod+S selection\n Mod+Shift+P phrase\n}\n",
         )
         .unwrap();
-        assert_eq!(settings.chords.len(), 3);
-        assert_eq!(settings.chords[0].scancode, 38);
-        assert_eq!(settings.chords[0].kind, GestureKind::Word);
-        assert_eq!(settings.chords[1].kind, GestureKind::Selection);
-        assert_eq!(settings.chords[2].kind, GestureKind::Phrase);
+        assert_eq!(settings.binds.len(), 3);
+        assert_eq!(settings.binds[0].scancode, 38);
+        assert_eq!(settings.binds[0].kind, GestureKind::Word);
+        assert!(settings.binds[0].mods.meta);
+        assert_eq!(settings.binds[1].kind, GestureKind::Selection);
+        assert_eq!(settings.binds[2].kind, GestureKind::Phrase);
+        assert!(settings.binds[2].mods.meta && settings.binds[2].mods.shift);
     }
 
     #[test]
-    fn chords_reject_bad_combos_and_actions() {
-        for node in [
-            "chord \"ctrl+l\" \"word\"\n",
-            "chord \"l\" \"word\"\n",
-            "chord \"meta+\" \"word\"\n",
-            "chord \"meta+space\" \"word\"\n",
-            "chord \"meta+L\" \"word\"\n",
-            "chord \"meta+l\" \"sentence\"\n",
-            "chord \"meta+l\"\n",
-            "chord \"meta+l\" \"word\" \"extra\"\n",
+    fn binds_accept_lowercase_modifiers() {
+        let settings = parse_settings("layouts \"us\" \"ru\"\nbinds {\n mod+l word\n}\n").unwrap();
+        assert!(settings.binds[0].mods.meta);
+    }
+
+    #[test]
+    fn binds_reject_bad_combos_and_actions() {
+        for block in [
+            "binds {\n Win+L word\n}\n",
+            "binds {\n L word\n}\n",
+            "binds {\n Mod+ word\n}\n",
+            "binds {\n Mod+Space word\n}\n",
+            "binds {\n Mod+Alt+L word\n}\n",
+            "binds {\n Mod+L sentence\n}\n",
+            "binds {\n Mod+L\n}\n",
+            "binds {\n Mod+L word extra\n}\n",
+            "binds {\n Mod+L word\n}\nbinds {\n Mod+S selection\n}\n",
+            "binds Mod+L\n",
         ] {
-            let text = format!("layouts \"us\" \"ru\"\n{node}");
-            assert!(parse_settings(&text).is_err(), "{node}");
+            let text = format!("layouts \"us\" \"ru\"\n{block}");
+            assert!(parse_settings(&text).is_err(), "{block}");
         }
+    }
+
+    #[test]
+    fn chord_lines_fail_with_migration_hint() {
+        let error =
+            parse_settings("layouts \"us\" \"ru\"\nchord \"meta+l\" \"word\"\n").unwrap_err();
+        assert!(error.to_string().contains("binds"), "{error}");
     }
 
     #[test]

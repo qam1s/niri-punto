@@ -34,21 +34,21 @@ niri-punto setup
 
 ## Usage
 
-| Gesture              | Action                                       |
-| -------------------- | -------------------------------------------- |
-| Double Shift         | Convert last word                            |
-| Mod tap              | Convert last word (switch layout when empty) |
-| Shift + Double Shift | Convert phrase                               |
-| Ctrl + Double Shift  | Convert selection (via clipboard)            |
-| Ctrl + Mod tap       | Convert selection (via clipboard)            |
-| Repeat gesture       | Undo                                         |
+| Gesture        | Action            |
+| -------------- | ----------------- |
+| Mod            | Convert word      |
+| Mod + Shift    | Convert phrase    |
+| Double Shift   | Convert selection |
+| Repeat gesture | Undo              |
 
 Prefer key binds? Put them in the punto config instead — daemon-side
-chords need no niri binds and scope exactly:
+binds need no niri binds and scope exactly:
 
 ```kdl
-chord "meta+l" "word"
-chord "meta+s" "selection"
+binds {
+    Mod+L word
+    Mod+S selection
+}
 ```
 
 Raw niri binds still work as an alternative:
@@ -59,8 +59,9 @@ Mod+L { spawn "niri-punto" "convert-word"; }
 
 The daemon must be running; the command asks it over the control
 socket. Raw niri binds cover word and selection only — phrase stays a
-Shift+Double Shift gesture (or a chord). Note the bind's own key lands
-in the trailing word; chords don't have this problem.
+Shift+Double Shift gesture (or a daemon-side bind). Note the bind's own
+key lands in the trailing word; daemon-side binds don't have this
+problem.
 
 Layouts are configured as an ordered pair in `config.kdl`; `niri-punto doctor`
 checks devices, permissions, the niri socket, and the index mapping.
@@ -83,15 +84,18 @@ Triggers live here too — no niri binds needed:
 
 ```kdl
 tap "meta"
-chord "meta+l" "word"
-chord "meta+s" "selection"
+binds {
+    Mod+L word
+    Mod+S selection
+}
 ```
 
 `tap` is the lone-modifier trigger (`meta` or `off`, default `meta`).
-Each `chord` line is Meta held + key press, with the action `word`,
-`phrase`, or `selection`; key names are lowercase letters and digits.
-The chord key is the trigger, not text, so the converted scope stays
-exact. A bad file stops the daemon at start, like a bad `layouts` node.
+Each `binds` entry is the required modifiers (`Mod`, `Shift`, `Ctrl` —
+at least one) held plus the key press, with the action `word`, `phrase`,
+or `selection`; key names are letters and digits. The bind key is the
+trigger, not text, so the converted scope stays exact. A bad file stops
+the daemon at start, like a bad `layouts` node.
 
 Trigger timings in milliseconds (absent keys mean the defaults):
 

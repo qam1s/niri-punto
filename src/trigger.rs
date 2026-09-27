@@ -60,10 +60,27 @@ pub enum TapMode {
     Off,
 }
 
-/// A daemon-side chord from a config `chord` line: the modifier is always
-/// Meta for now, so only the key scancode and the scope travel here.
+/// Modifier set of a daemon-side bind, in niri spelling (`Mod` is Super).
+/// At least one modifier is required; Alt is rejected at config load
+/// until the machine tracks it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct ModSet {
+    pub meta: bool,
+    pub shift: bool,
+    pub ctrl: bool,
+}
+
+impl ModSet {
+    pub fn any(self) -> bool {
+        self.meta || self.shift || self.ctrl
+    }
+}
+
+/// A daemon-side bind from the config `binds` block: the modifiers held
+/// plus the key press convert with the given scope.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Chord {
+pub struct Bind {
+    pub mods: ModSet,
     pub scancode: u16,
     pub kind: GestureKind,
 }
@@ -165,7 +182,7 @@ pub struct TriggerMachine {
     tap_press_ms: Option<u64>,
     tap_disturbed: bool,
     tap: TapMode,
-    chords: Vec<Chord>,
+    binds: Vec<Bind>,
     timing: TimingConfig,
     last_gesture: Option<(GestureKind, u64)>,
 }
@@ -183,7 +200,7 @@ impl TriggerMachine {
             tap_press_ms: None,
             tap_disturbed: false,
             tap: TapMode::Meta,
-            chords: Vec::new(),
+            binds: Vec::new(),
             timing: TimingConfig::default(),
             last_gesture: None,
         }
@@ -211,9 +228,9 @@ impl TriggerMachine {
         self.tap = tap;
     }
 
-    /// Daemon-side chords from the config (`chord` lines).
-    pub fn set_chords(&mut self, chords: Vec<Chord>) {
-        self.chords = chords;
+    /// Daemon-side binds from the config (`binds` block).
+    pub fn set_binds(&mut self, binds: Vec<Bind>) {
+        self.binds = binds;
     }
 
     /// Timing knobs from the config (`timings` block).
@@ -227,18 +244,25 @@ impl TriggerMachine {
         PendingGesture::new(gesture, now_ms, self.timing.pending_ms)
     }
 
-    /// A configured chord key pressed with Meta held. The caller checks
-    /// [`TriggerMachine::meta_held`] and press (not autorepeat) first;
-    /// undo accounting rides the shared gesture chain, like taps.
-    pub fn chord(&mut self, scancode: u16, now_ms: u64) -> Option<Gesture> {
+    /// A configured bind key pressed with its modifiers held. The caller
+    /// checks press (not autorepeat) first; required modifiers must all be
+    /// held, extra ones are allowed. Undo accounting rides the shared
+    /// gesture chain, like taps.
+    pub fn bind(&mut self, scancode: u16, now_ms: u64) -> Option<Gesture> {
         let kind = self
-            .chords
+            .binds
             .iter()
-            .find(|chord| chord.scancode == scancode)?
+            .find(|bind| bind.scancode == scancode && self.mods_match(bind.mods))?
             .kind;
         let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= self.timing.undo_ms);
         self.last_gesture = Some((kind, now_ms));
         Some(Gesture { kind, undo })
+    }
+
+    fn mods_match(&self, mods: ModSet) -> bool {
+        (!mods.meta || self.meta_held())
+            && (!mods.shift || self.shift_held())
+            && (!mods.ctrl || self.ctrl_held())
     }
 
     /// No Shift, Ctrl, or Mod held anywhere: replaying scancodes now renders
@@ -738,14 +762,25 @@ mod tests {
         assert_eq!(release(&mut m, Key::MetaLeft, T + 100), None);
     }
 
+    fn mod_meta(m: &mut TriggerMachine, at: u64) {
+        assert_eq!(press(m, Key::MetaLeft, at), None);
+    }
+
     #[test]
-    fn chord_fires_for_configured_scancode() {
+    fn bind_fires_with_its_modifiers_held() {
         let mut m = TriggerMachine::new();
-        m.set_chords(vec![Chord {
+        m.set_binds(vec![Bind {
+            mods: ModSet {
+                meta: true,
+                ..Default::default()
+            },
             scancode: 38,
             kind: GestureKind::Word,
         }]);
-        let g = m.chord(38, T);
+        // No modifiers: no bind.
+        assert_eq!(m.bind(38, T), None);
+        mod_meta(&mut m, T + 10);
+        let g = m.bind(38, T + 20);
         assert_eq!(
             g,
             Some(Gesture {
@@ -753,19 +788,71 @@ mod tests {
                 undo: false
             })
         );
-        assert_eq!(m.chord(30, T + 10), None);
+        // Unconfigured scancode: no bind.
+        assert_eq!(m.bind(30, T + 30), None);
+        release(&mut m, Key::MetaLeft, T + 40);
     }
 
     #[test]
-    fn repeated_chord_undoes() {
+    fn bind_allows_extra_modifiers() {
         let mut m = TriggerMachine::new();
-        m.set_chords(vec![Chord {
+        m.set_binds(vec![Bind {
+            mods: ModSet {
+                meta: true,
+                ..Default::default()
+            },
             scancode: 38,
             kind: GestureKind::Word,
         }]);
-        assert!(matches!(m.chord(38, T), Some(Gesture { undo: false, .. })));
+        mod_meta(&mut m, T);
+        assert_eq!(press(&mut m, Key::CtrlLeft, T + 10), None);
+        assert!(m.bind(38, T + 20).is_some());
+    }
+
+    #[test]
+    fn bind_with_shift_modifier() {
+        let mut m = TriggerMachine::new();
+        m.set_binds(vec![Bind {
+            mods: ModSet {
+                meta: true,
+                shift: true,
+                ..Default::default()
+            },
+            scancode: 38,
+            kind: GestureKind::Phrase,
+        }]);
+        mod_meta(&mut m, T);
+        // Shift missing: no bind.
+        assert_eq!(m.bind(38, T + 10), None);
+        assert_eq!(press(&mut m, Key::ShiftLeft, T + 20), None);
+        let g = m.bind(38, T + 30);
         assert_eq!(
-            m.chord(38, T + 500),
+            g,
+            Some(Gesture {
+                kind: GestureKind::Phrase,
+                undo: false
+            })
+        );
+    }
+
+    #[test]
+    fn repeated_bind_undoes() {
+        let mut m = TriggerMachine::new();
+        m.set_binds(vec![Bind {
+            mods: ModSet {
+                meta: true,
+                ..Default::default()
+            },
+            scancode: 38,
+            kind: GestureKind::Word,
+        }]);
+        mod_meta(&mut m, T);
+        assert!(matches!(
+            m.bind(38, T + 10),
+            Some(Gesture { undo: false, .. })
+        ));
+        assert_eq!(
+            m.bind(38, T + 500),
             Some(Gesture {
                 kind: GestureKind::Word,
                 undo: true
