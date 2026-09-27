@@ -28,6 +28,21 @@ pub fn backoff_delay(attempt: u32) -> Duration {
     Duration::from_millis(doubled.min(RECONNECT_MAX_MS))
 }
 
+/// Layout backend: layout index reads, index switches, event barrier. The
+/// production implementation is [`IpcClient`] (needs `$NIRI_SOCKET`); tests
+/// slot in a fake without a compositor.
+pub trait LayoutBackend {
+    /// Current layout index and configured layout count.
+    fn current_layout(&mut self) -> io::Result<(u8, usize)>;
+    /// Switch to `index` by explicit index.
+    fn switch_to(&mut self, index: u8) -> io::Result<()>;
+    /// Block until niri reports `target` as active.
+    fn wait_for_layout(&mut self, target: u8) -> io::Result<()>;
+    /// Re-establish a dead event stream, then check `target`. See
+    /// [`IpcClient::recover_barrier`].
+    fn recover_barrier(&mut self, target: u8) -> io::Result<bool>;
+}
+
 /// Client holding the request socket and the event-stream reader.
 pub struct IpcClient {
     requests: Socket,
@@ -69,7 +84,8 @@ impl IpcClient {
     }
 
     /// Full layout state: names in index order plus the current index.
-    /// [`current_layout`] is the index/count projection `doctor` reports.
+    /// [`current_layout`](LayoutBackend::current_layout) is the index/count
+    /// projection `doctor` reports.
     pub fn layouts(&mut self) -> io::Result<KeyboardLayouts> {
         match self.requests.send(Request::KeyboardLayouts) {
             Ok(Ok(Response::KeyboardLayouts(layouts))) => Ok(layouts),
@@ -83,16 +99,18 @@ impl IpcClient {
             Err(error) => Err(error),
         }
     }
+}
 
+impl LayoutBackend for IpcClient {
     /// Current layout index and configured layout count.
-    pub fn current_layout(&mut self) -> io::Result<(u8, usize)> {
+    fn current_layout(&mut self) -> io::Result<(u8, usize)> {
         let layouts = self.layouts()?;
         Ok((layouts.current_idx, layouts.names.len()))
     }
 
     /// Switch to `index` by explicit index. Rejects out-of-range u8 upstream;
     /// the caller passes indices learned from niri itself.
-    pub fn switch_to(&mut self, index: u8) -> io::Result<()> {
+    fn switch_to(&mut self, index: u8) -> io::Result<()> {
         let action = Action::SwitchLayout {
             layout: LayoutSwitchTarget::Index(index),
         };
@@ -112,7 +130,7 @@ impl IpcClient {
     /// Block until niri reports `target` as active. Skips unrelated events;
     /// never sleeps. An I/O error means the event stream died — the caller
     /// recovers via [`IpcClient::recover_barrier`] instead of exiting.
-    pub fn wait_for_layout(&mut self, target: u8) -> io::Result<()> {
+    fn wait_for_layout(&mut self, target: u8) -> io::Result<()> {
         loop {
             let event = (self.read_event)()?;
             if event_is_layout(&event, target) {
@@ -126,13 +144,13 @@ impl IpcClient {
     /// satisfied after recovery, `Ok(false)` when the stream is back but
     /// the layout sits elsewhere, and `Err` when reconnects ran out (the
     /// caller fails the conversion; exiting stays the last resort).
-    pub fn recover_barrier(&mut self, target: u8) -> io::Result<bool> {
+    fn recover_barrier(&mut self, target: u8) -> io::Result<bool> {
         let mut last = io::Error::other("no attempts ran");
         for attempt in 0..RECONNECT_ATTEMPTS {
             match subscribe_events() {
                 Ok(read_event) => {
                     self.read_event = read_event;
-                    let (current, _) = self.current_layout()?;
+                    let (current, _) = LayoutBackend::current_layout(self)?;
                     return Ok(current == target);
                 }
                 Err(error) => {
