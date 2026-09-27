@@ -21,6 +21,7 @@
 mod tables;
 
 use crate::buffer::BufferEntry;
+use crate::config::LayoutPair;
 
 /// Minimum average-log-prob gap per bigram for a confident verdict.
 pub const CONFIDENCE_MARGIN: f32 = 2.6;
@@ -224,12 +225,14 @@ pub enum Intended {
 }
 
 impl Intended {
-    /// Pair position of the intended layout: the first pair entry is the
-    /// Latin side, the second the Cyrillic side (see the `layouts` config).
-    pub fn index(self) -> u8 {
+    /// Pair position of the intended layout, resolved through the pair
+    /// order: the Latin side holds `Us`, the Cyrillic side `Ru` (so a
+    /// `layout ru,us` config verdicts the opposite positions from `us,ru`).
+    pub fn index_in(self, pair: &LayoutPair) -> u8 {
+        let latin = pair.latin_index();
         match self {
-            Self::Us => 0,
-            Self::Ru => 1,
+            Self::Us => latin,
+            Self::Ru => 1 - latin,
         }
     }
 }
@@ -395,6 +398,17 @@ mod tests {
     fn tuning_constants_match_the_wider_corpus() {
         assert_eq!(CONFIDENCE_MARGIN, 2.6);
         assert_eq!(MIN_LETTERS, 3);
+    }
+
+    #[test]
+    fn intended_index_follows_the_pair_order() {
+        use crate::config::LayoutPair;
+        let usual = LayoutPair::new("us", "ru").unwrap();
+        assert_eq!(Intended::Us.index_in(&usual), 0);
+        assert_eq!(Intended::Ru.index_in(&usual), 1);
+        let swapped = LayoutPair::new("ru", "us").unwrap();
+        assert_eq!(Intended::Us.index_in(&swapped), 1);
+        assert_eq!(Intended::Ru.index_in(&swapped), 0);
     }
 
     #[test]

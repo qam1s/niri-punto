@@ -19,6 +19,7 @@
 
 use crate::buffer::BufferEntry;
 use crate::config::LayoutPair;
+use crate::scorer::Intended;
 use crate::undo::{LayoutCtx, LayoutHop, Reversible, UndoChain};
 use std::fmt;
 
@@ -154,18 +155,19 @@ impl Converter {
         Ok(plan)
     }
 
-    /// Plan a fresh conversion toward an explicit pair position (a
-    /// confident detector verdict's intended layout) and remember it.
+    /// Plan a fresh conversion toward a confident detector verdict's
+    /// intended layout (resolved to a pair position through the pair order)
+    /// and remember it.
     pub fn convert_toward(
         &mut self,
         entries: &[BufferEntry],
-        target: u8,
+        intended: Intended,
         current: u8,
         layout_count: usize,
     ) -> Result<ConversionPlan, ConversionError> {
         let plan = plan_conversion_toward(
             entries,
-            target,
+            intended.index_in(&self.pair),
             LayoutCtx {
                 current,
                 count: layout_count,
@@ -266,6 +268,24 @@ mod tests {
             plan_conversion_toward(&word(), 1, ctx(&pair(), 2, 3)),
             plan_conversion(&word(), ctx(&pair(), 2, 3))
         );
+    }
+
+    #[test]
+    fn toward_resolves_the_intended_layout_through_a_swapped_pair() {
+        use crate::scorer::Intended;
+        let swapped = LayoutPair::new("ru", "us").unwrap();
+        // Cyrillic verdict lands on position 0 under `layout ru,us`, from
+        // the diverged current for a correct undo.
+        let mut converter = Converter::new(swapped);
+        let plan = converter
+            .convert_toward(&word(), Intended::Ru, 1, 2)
+            .unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
+        assert_eq!(plan.erase, 6);
+        let plan = converter
+            .convert_toward(&word(), Intended::Us, 0, 2)
+            .unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
     }
 
     #[test]

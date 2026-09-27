@@ -40,10 +40,8 @@ impl Reversible for SelectionPlan {
 }
 
 /// Plan a conversion of the selected `text` inside `ctx`. The current layout
-/// names the source alphabet: text in the first layout maps to the second,
-/// text in the second maps back. Pair order is the contract: the first entry
-/// is the Latin side, the second the Cyrillic side (see the `layouts`
-/// config).
+/// names the source alphabet via the pair order: text under the Latin side
+/// maps to Cyrillic, text under the Cyrillic side maps back.
 pub fn plan_selection(text: &str, ctx: LayoutCtx<'_>) -> Result<SelectionPlan, ConversionError> {
     if text.is_empty() {
         return Err(ConversionError::Empty);
@@ -51,7 +49,7 @@ pub fn plan_selection(text: &str, ctx: LayoutCtx<'_>) -> Result<SelectionPlan, C
     Ok(SelectionPlan {
         hop: ctx.hop()?,
         original: text.to_string(),
-        converted: keymaps::convert(text, ctx.current == 1),
+        converted: keymaps::convert(text, ctx.current != ctx.pair.latin_index()),
     })
 }
 
@@ -69,7 +67,7 @@ pub fn plan_selection_toward(
         return Err(ConversionError::Empty);
     }
     Ok(SelectionPlan {
-        hop: ctx.hop_toward(intended.index())?,
+        hop: ctx.hop_toward(intended.index_in(ctx.pair))?,
         original: text.to_string(),
         converted: keymaps::convert(text, intended == Intended::Us),
     })
@@ -213,6 +211,27 @@ mod tests {
             plan_selection_toward("ghbdtn", Intended::Ru, ctx(&pair(), 2, 3)),
             plan_selection("ghbdtn", ctx(&pair(), 2, 3))
         );
+    }
+
+    #[test]
+    fn swapped_pair_resolves_hop_target_and_alphabet() {
+        let swapped = LayoutPair::new("ru", "us").unwrap();
+        // Confident Cyrillic verdict hops to position 0 with EN->RU text.
+        let plan = plan_selection_toward("ghbdtn", Intended::Ru, ctx(&swapped, 1, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
+        assert_eq!(plan.converted, "привет");
+        // Intended Latin hops to position 1 with RU->EN text.
+        let plan = plan_selection_toward("привет", Intended::Us, ctx(&swapped, 0, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
+        assert_eq!(plan.converted, "ghbdtn");
+        // Decline path reads the source alphabet from the pair order too:
+        // Cyrillic under current 0 maps RU->EN while hopping to 1.
+        let plan = plan_selection("привет", ctx(&swapped, 0, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
+        assert_eq!(plan.converted, "ghbdtn");
+        let plan = plan_selection("ghbdtn", ctx(&swapped, 1, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
+        assert_eq!(plan.converted, "привет");
     }
 
     #[test]

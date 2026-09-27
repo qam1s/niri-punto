@@ -134,9 +134,7 @@ fn do_convert(
         .current_layout()
         .map_err(|error| format!("layout read failed: {error}"))?;
     let plan = match detector.verdict(phrase) {
-        Verdict::Intended(intended) => {
-            converter.convert_toward(entries, intended.index(), current, count)
-        }
+        Verdict::Intended(intended) => converter.convert_toward(entries, intended, current, count),
         Verdict::Decline => converter.convert(entries, current, count),
     }
     .map_err(|error| format!("skipped ({error})"))?;
@@ -853,6 +851,10 @@ mod tests {
 
         fn with_detector(detector: Box<dyn Detector>) -> Self {
             let pair = LayoutPair::new("us", "ru").unwrap();
+            Self::with_detector_and_pair(detector, pair)
+        }
+
+        fn with_detector_and_pair(detector: Box<dyn Detector>, pair: LayoutPair) -> Self {
             Self {
                 triggers: TriggerMachine::new(),
                 buffer: InputBuffer::default(),
@@ -1005,6 +1007,39 @@ mod tests {
         assert!(h.ipc.switches.is_empty());
         h.at(T + 300, CTRL, 0);
         assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
+        assert_eq!(h.injector.pastes, 1);
+    }
+
+    #[test]
+    fn swapped_pair_diverged_word_converts_toward_the_ru_position() {
+        // `layout ru,us`: the confident RU verdict for `ghbdtn` keystrokes
+        // hops to position 0 even with the diverged current at 1, so the
+        // text and the indicator land together.
+        let pair = LayoutPair::new("ru", "us").unwrap();
+        let mut h = Harness::with_detector_and_pair(Box::new(BigramDetector), pair);
+        h.type_codes(T, &GHBTDN);
+        h.ipc.current = 1;
+        h.double_shift(T + 500);
+        assert_eq!(h.ipc.switches, vec![0]);
+        assert_eq!(h.injector.erases, vec![6]);
+    }
+
+    #[test]
+    fn swapped_pair_diverged_selection_converts_toward_the_ru_position() {
+        // `layout ru,us`: clipboard "ghbdtn" with current at 1 verdicts RU,
+        // writes Cyrillic, and hops to position 0.
+        let pair = LayoutPair::new("ru", "us").unwrap();
+        let mut h = Harness::with_detector_and_pair(Box::new(BigramDetector), pair);
+        h.ipc.current = 1;
+        h.at(T, CTRL, 1);
+        h.at(T + 50, SHIFT, 1);
+        h.at(T + 100, SHIFT, 0);
+        h.at(T + 200, SHIFT, 1);
+        h.at(T + 250, SHIFT, 0);
+        assert!(h.ipc.switches.is_empty());
+        h.at(T + 300, CTRL, 0);
+        assert_eq!(h.ipc.switches, vec![0]);
         assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
         assert_eq!(h.injector.pastes, 1);
     }
