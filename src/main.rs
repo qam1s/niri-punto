@@ -427,6 +427,10 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     let mut pending: Option<PendingGesture> = None;
     let detector = BigramDetector;
     let mut clipboard = clipboard::WlClipboard;
+    // Window-focus tracking: the input buffer belongs to one window (see
+    // `note_focus`). `None` until the first successful query.
+    let mut last_focus: Option<Option<u64>> = None;
+    let mut focus_broken = false;
     eprintln!(
         "detector: {} (direction verdicts, no auto conversion)",
         detector.name()
@@ -456,6 +460,12 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
                     injector: &mut injector,
                     clipboard: &mut clipboard,
                 };
+                note_focus(
+                    &mut daemon,
+                    &mut last_focus,
+                    &mut focus_broken,
+                    &mut pending,
+                );
                 handle_key(raw, &start, &mut daemon, &mut pending);
             }
         }
@@ -471,6 +481,12 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
                 clipboard: &mut clipboard,
             };
             let now_ms = start.elapsed().as_millis() as u64;
+            note_focus(
+                &mut daemon,
+                &mut last_focus,
+                &mut focus_broken,
+                &mut pending,
+            );
             handle_control(request, now_ms, &mut daemon, &mut pending);
         }
     }
@@ -565,6 +581,39 @@ struct Daemon<'a, I: Emitter, L: LayoutBackend, C: Clipboard> {
     ipc: &'a mut L,
     injector: &'a mut I,
     clipboard: &'a mut C,
+}
+
+/// Window-focus tracking: the input buffer belongs to one window, so a
+/// focus change clears it, cancels pending undos, and drops a staged
+/// gesture (the same "context moved on" rule as new physical input).
+/// Without this, typing in the browser then triggering in the terminal
+/// replays foreign scancodes there. Runs before each key event and each
+/// niri-bind request. A failed query keeps the old state; outages log
+/// once until queries succeed again.
+fn note_focus(
+    daemon: &mut Daemon<impl Emitter, impl LayoutBackend, impl Clipboard>,
+    last_focus: &mut Option<Option<u64>>,
+    focus_broken: &mut bool,
+    pending: &mut Option<PendingGesture>,
+) {
+    match daemon.ipc.focused_window_id() {
+        Ok(focus) => {
+            *focus_broken = false;
+            if last_focus.replace(focus).is_some_and(|old| old != focus) {
+                daemon.buffer.clear();
+                daemon.converter.invalidate();
+                daemon.selection_converter.invalidate();
+                *pending = None;
+                eprintln!("focus: window changed, buffer cleared");
+            }
+        }
+        Err(error) => {
+            if !*focus_broken {
+                *focus_broken = true;
+                eprintln!("focus: query failed ({error}); keeping buffer");
+            }
+        }
+    }
 }
 
 fn handle_key(
@@ -793,6 +842,8 @@ mod tests {
         switches: Vec<u8>,
         wait_calls: usize,
         stream_dead: bool,
+        focus: Option<u64>,
+        focus_err: bool,
     }
 
     impl LayoutBackend for FakeLayouts {
@@ -819,6 +870,13 @@ mod tests {
                 return Err(io::Error::other("stream dead"));
             }
             Ok(self.current == target)
+        }
+
+        fn focused_window_id(&mut self) -> io::Result<Option<u64>> {
+            if self.focus_err {
+                return Err(io::Error::other("focus query dead"));
+            }
+            Ok(self.focus)
         }
     }
 
@@ -860,6 +918,8 @@ mod tests {
         clipboard: FakeClipboard,
         pending: Option<PendingGesture>,
         now: u64,
+        last_focus: Option<Option<u64>>,
+        focus_broken: bool,
     }
 
     impl Harness {
@@ -885,6 +945,8 @@ mod tests {
                     switches: Vec::new(),
                     wait_calls: 0,
                     stream_dead: false,
+                    focus: Some(7),
+                    focus_err: false,
                 },
                 injector: FakeEmitter::default(),
                 clipboard: FakeClipboard {
@@ -893,6 +955,8 @@ mod tests {
                 },
                 pending: None,
                 now: T,
+                last_focus: None,
+                focus_broken: false,
             }
         }
 
@@ -909,6 +973,27 @@ mod tests {
                 clipboard: &mut self.clipboard,
             };
             handle_key_at(raw, self.now, &mut daemon, &mut self.pending);
+        }
+
+        /// Run the production focus guard: same call the run loop makes
+        /// before each key event and each niri-bind request.
+        fn check_focus(&mut self) {
+            let mut daemon = Daemon {
+                triggers: &mut self.triggers,
+                buffer: &mut self.buffer,
+                converter: &mut self.converter,
+                selection_converter: &mut self.selection_converter,
+                detector: self.detector.as_ref(),
+                ipc: &mut self.ipc,
+                injector: &mut self.injector,
+                clipboard: &mut self.clipboard,
+            };
+            note_focus(
+                &mut daemon,
+                &mut self.last_focus,
+                &mut self.focus_broken,
+                &mut self.pending,
+            );
         }
 
         fn at(&mut self, now: u64, scancode: u16, value: i32) {
@@ -964,6 +1049,52 @@ mod tests {
         let mut h = Harness::new();
         assert!(wait_for_barrier(&mut h.ipc, 1));
         assert_eq!(h.ipc.wait_calls, 1);
+    }
+
+    #[test]
+    fn focus_change_clears_buffer_cancels_undo_and_drops_pending() {
+        use crate::trigger::{Gesture, GestureKind};
+
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.check_focus();
+        assert!(!h.buffer.phrase().is_empty());
+        // A conversion leaves a pending undo behind.
+        h.double_shift(T + 500);
+        assert!(h.converter.has_pending_undo());
+        // A staged gesture waits for release.
+        h.pending = Some(h.triggers.stage(
+            Gesture {
+                kind: GestureKind::Word,
+                undo: false,
+            },
+            h.now,
+        ));
+        // Same window: everything survives.
+        h.check_focus();
+        assert!(!h.buffer.phrase().is_empty());
+        assert!(h.converter.has_pending_undo());
+        assert!(h.pending.is_some());
+        // Another window: buffer cleared, undo cancelled, staged dropped.
+        h.ipc.focus = Some(99);
+        h.check_focus();
+        assert!(h.buffer.phrase().is_empty());
+        assert!(!h.converter.has_pending_undo());
+        assert!(h.pending.is_none());
+    }
+
+    #[test]
+    fn focus_query_error_keeps_buffer_until_recovery() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.check_focus();
+        h.ipc.focus_err = true;
+        h.check_focus();
+        assert!(!h.buffer.phrase().is_empty());
+        // Recovery on the same window keeps the buffer too.
+        h.ipc.focus_err = false;
+        h.check_focus();
+        assert!(!h.buffer.phrase().is_empty());
     }
 
     #[test]
