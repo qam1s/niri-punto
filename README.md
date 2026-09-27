@@ -43,8 +43,9 @@ niri-punto setup
 
 ## Config
 
-`setup` writes the default config to `$XDG_CONFIG_HOME/niri-punto/config.kdl`
-and never overwrites an existing file. The full default, line by line:
+`setup` writes the default config to `~/.config/niri-punto/config.kdl`
+(`$XDG_CONFIG_HOME` respected when set) and never overwrites an existing
+file. The full default, line by line:
 
 ```kdl
 // Ordered layout pair: position maps to the niri layout index, so the
