@@ -116,6 +116,18 @@ impl Runner for RealRunner {
     }
 }
 
+/// True when both paths name the same file (device+inode, following
+/// symlinks). Re-running `setup` from the installed binary must skip the
+/// copy: a running executable cannot be opened O_TRUNC (`ETXTBSY`), and the
+/// copy would be a no-op anyway. A missing path is never "the same".
+pub fn is_same_file(first: &Path, second: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(first), std::fs::metadata(second)) {
+        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
+        _ => false,
+    }
+}
+
 /// Copy the running binary to `~/.local/bin`, creating the dir and
 /// preserving executability.
 pub fn install_binary(exe: &Path, dest: &Path) -> io::Result<()> {
@@ -186,12 +198,23 @@ pub fn user_commands() -> Vec<Command> {
 }
 
 /// The escalated udev step: install the rule, reload, trigger.
+/// The trigger replays `add` (scoped to the input subsystem): logind writes
+/// uaccess ACLs on add events, so already-present devices become readable
+/// without a reboot or replug. A bare `trigger` (change) only retags them.
 pub fn udev_commands(rule_src: &Path) -> Vec<Command> {
     let src = rule_src.to_string_lossy().to_string();
     vec![
         Command::new("sudo", &["install", "-m", "644", &src, doctor::RULE_DEST]),
         Command::new("sudo", &["udevadm", "control", "--reload-rules"]),
-        Command::new("sudo", &["udevadm", "trigger"]),
+        Command::new(
+            "sudo",
+            &[
+                "udevadm",
+                "trigger",
+                "--action=add",
+                "--subsystem-match=input",
+            ],
+        ),
     ]
 }
 
@@ -224,7 +247,9 @@ pub fn staging_dir() -> PathBuf {
 /// Run the install. Returns the process exit code.
 pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
     let binary_dest = paths.bin_dir.join("niri-punto");
-    if !step("binary", &binary_dest, options.dry_run, || {
+    if !options.dry_run && is_same_file(&paths.exe, &binary_dest) {
+        println!("binary: already in place at {}", binary_dest.display());
+    } else if !step("binary", &binary_dest, options.dry_run, || {
         install_binary(&paths.exe, &binary_dest)
     }) {
         return 1;
@@ -303,6 +328,22 @@ fn exec(runner: &dyn Runner, dry_run: bool, command: &Command) -> io::Result<()>
     runner.run(command)
 }
 
+/// The deepest ancestor of `path` (or `path` itself) that is a symlink
+/// whose target does not resolve — e.g. a dotfiles layout pointing at a
+/// missing dir. Explains otherwise cryptic `create_dir_all` failures
+/// (`EEXIST` on the dangling link).
+fn dangling_symlink_on_path(path: &Path) -> Option<(PathBuf, PathBuf)> {
+    let mut current: &Path = path;
+    loop {
+        if let Ok(meta) = std::fs::symlink_metadata(current) {
+            if meta.file_type().is_symlink() && std::fs::metadata(current).is_err() {
+                let target = std::fs::read_link(current).unwrap_or_default();
+                return Some((current.to_path_buf(), target));
+            }
+        }
+        current = current.parent()?;
+    }
+}
 /// Print a `name: dest` line and run the file step (or its dry-run echo).
 /// Returns false after reporting a failure.
 fn step(name: &str, dest: &Path, dry_run: bool, install: impl FnOnce() -> io::Result<()>) -> bool {
@@ -317,6 +358,13 @@ fn step(name: &str, dest: &Path, dry_run: bool, install: impl FnOnce() -> io::Re
         }
         Err(error) => {
             eprintln!("{name}: {error}");
+            if let Some((link, target)) = dangling_symlink_on_path(dest) {
+                eprintln!(
+                    "hint: dangling symlink {} -> {}; create the target dir or remove the link",
+                    link.display(),
+                    target.display()
+                );
+            }
             false
         }
     }
@@ -386,6 +434,9 @@ mod tests {
     fn embedded_rule_grants_uaccess() {
         assert!(RULE_SOURCE.contains("uaccess"));
         assert!(RULE_SOURCE.contains("SUBSYSTEM==\"input\""));
+        // The daemon injects through /dev/uinput (root-only by default,
+        // tagged by no stock rule): without this line it exits on start.
+        assert!(RULE_SOURCE.contains("KERNEL==\"uinput\""));
     }
 
     #[test]
@@ -424,6 +475,62 @@ mod tests {
     }
 
     #[test]
+    fn same_file_spots_self_symlink_and_hardlink() {
+        let dir = scratch("setup-samefile");
+        let exe = fake_exe(&dir);
+        assert!(is_same_file(&exe, &exe));
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&exe, &link).unwrap();
+        assert!(is_same_file(&exe, &link));
+        let hard = dir.join("hard");
+        std::fs::hard_link(&exe, &hard).unwrap();
+        assert!(is_same_file(&exe, &hard));
+        let other = dir.join("other");
+        std::fs::write(&other, b"other").unwrap();
+        assert!(!is_same_file(&exe, &other));
+        assert!(!is_same_file(&exe, &dir.join("missing")));
+    }
+
+    #[test]
+    fn rerun_from_the_installed_binary_skips_the_copy() {
+        let (_root, mut paths) = test_paths("setup-self");
+        let runner = FakeRunner::new();
+        assert_eq!(run(Options::default(), &paths, &runner), 0);
+        let installed = paths.bin_dir.join("niri-punto");
+        // A read-only destination proves the skip: a copy attempt would
+        // fail, and on a live system the running binary reports ETXTBSY.
+        let mut permissions = std::fs::metadata(&installed).unwrap().permissions();
+        permissions.set_mode(0o444);
+        std::fs::set_permissions(&installed, permissions).unwrap();
+        paths.exe = installed.clone();
+        assert_eq!(run(Options::default(), &paths, &runner), 0);
+        assert_eq!(std::fs::read(&installed).unwrap(), b"fake-binary");
+    }
+
+    #[test]
+    fn dangling_symlink_in_the_path_is_named() {
+        let dir = scratch("setup-dangling");
+        let link = dir.join("cfg");
+        std::os::unix::fs::symlink(dir.join("nowhere"), &link).unwrap();
+        let dest = link.join("systemd").join("user").join(SERVICE_FILE_NAME);
+        let (found, target) = dangling_symlink_on_path(&dest).unwrap();
+        assert_eq!(found, link);
+        assert_eq!(target, dir.join("nowhere"));
+    }
+
+    #[test]
+    fn healthy_paths_have_no_dangling_hint() {
+        let dir = scratch("setup-nodangle");
+        let dest = dir.join("sub").join(SERVICE_FILE_NAME);
+        assert!(dangling_symlink_on_path(&dest).is_none());
+        let real = dir.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let ok_link = dir.join("ok");
+        std::os::unix::fs::symlink(&real, &ok_link).unwrap();
+        assert!(dangling_symlink_on_path(&ok_link.join(SERVICE_FILE_NAME)).is_none());
+    }
+
+    #[test]
     fn shipped_rule_wins_over_staging() {
         let dir = scratch("setup-rule");
         let exe = fake_exe(&dir);
@@ -448,6 +555,10 @@ mod tests {
         assert!(manual.contains("sudo install -m 644"));
         assert!(manual.contains(doctor::RULE_DEST));
         assert!(manual.contains("udevadm control --reload-rules"));
+        // Add (not change) events are what make logind write uaccess ACLs
+        // onto already-present devices (no reboot/replug needed).
+        assert!(manual.contains("--action=add"));
+        assert!(manual.contains("--subsystem-match=input"));
     }
 
     #[test]
