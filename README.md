@@ -45,7 +45,7 @@ niri-punto setup
 | Gesture        | Action    | Description                              |
 | -------------- | --------- | ---------------------------------------- |
 | Mod            | word      | Convert word or switch layout when empty |
-| Mod + Shift    | phrase    | Hold Mod, press Shift, release both      |
+| Mod + Shift    | phrase    | Convert phrase                           |
 | Double Shift   | selection | Convert selection                        |
 | Repeat gesture | undo      | Undo previous conversion                 |
 
@@ -60,6 +60,7 @@ layout "us" "ru"
 
 binds {
     Mod word
+    Mod+Shift phrase
     Double-Shift selection
 }
 
@@ -71,24 +72,6 @@ timings {
     tap-ms 300
 }
 ```
-
-## Troubleshooting
-
-Layout switched between typing and triggering (you typed `ghbdtn` in us,
-something flipped to ru before you hit the trigger): the daemon reads the
-typed text itself, not the current layout indicator. It remembers which
-layout was active when you started typing. When that layout moved since
-(a switch happened), a confident read of the text sets the target and the
-screen text gets fixed. When nothing moved, the trigger converts away
-from the current layout, like it always did — even when the text reads as
-the current language (`api` typed in us still converts away on trigger).
-
-When the read is unsure it also converts away from the current layout.
-Unsure inputs are short text (fewer than 3 scorable characters), mixed
-phrases, and code-like tokens (`http`, `cfg`).
-
-Remembered input belongs to one window: switching windows forgets it, so
-a trigger never replays text typed elsewhere.
 
 ## Development
 
