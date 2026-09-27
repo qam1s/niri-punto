@@ -40,6 +40,43 @@ pub struct Gesture {
     pub undo: bool,
 }
 
+/// How long a recognized gesture waits for a modifier-free moment before
+/// it is dropped. Covers slow Shift releases; bounds the window in which a
+/// focus change could redirect the conversion.
+pub const PENDING_TIMEOUT_MS: u64 = 2000;
+
+/// A gesture waiting for a modifier-free moment to run. Conversions must
+/// never replay while Shift/Ctrl is physically held: the held modifier
+/// would combine with the replayed scancodes (uppercase text, or app
+/// shortcuts for Ctrl), so the daemon fires these on release instead.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PendingGesture {
+    pub kind: GestureKind,
+    pub undo: bool,
+    deadline_ms: u64,
+}
+
+impl PendingGesture {
+    pub fn new(gesture: Gesture, now_ms: u64) -> Self {
+        Self {
+            kind: gesture.kind,
+            undo: gesture.undo,
+            deadline_ms: now_ms.saturating_add(PENDING_TIMEOUT_MS),
+        }
+    }
+
+    /// Ready when no modifier is held and the wait has not expired.
+    pub fn ready(&self, now_ms: u64, modifiers_free: bool) -> bool {
+        modifiers_free && now_ms <= self.deadline_ms
+    }
+
+    /// Too long since recognition (e.g. stuck modifier, focus moved on):
+    /// the caller drops it instead of converting stale context.
+    pub fn expired(&self, now_ms: u64) -> bool {
+        now_ms > self.deadline_ms
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Side {
     Left,
@@ -91,6 +128,12 @@ impl TriggerMachine {
     /// Ctrl currently held on either side (for selection gestures).
     pub fn ctrl_held(&self) -> bool {
         self.ctrl_down[0] || self.ctrl_down[1]
+    }
+
+    /// No Shift or Ctrl held anywhere: replaying scancodes now renders
+    /// exactly what the buffer holds, with no held-modifier interference.
+    pub fn modifiers_free(&self) -> bool {
+        !self.shift_held() && !self.ctrl_held()
     }
 
     pub fn key(&mut self, key: Key, pressed: bool, now_ms: u64) -> Option<Gesture> {
@@ -408,5 +451,46 @@ mod tests {
         assert_eq!(release(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftRight, T + 10), None);
         assert_eq!(release(&mut m, Key::Other, T + 20), None);
+    }
+
+    #[test]
+    fn modifiers_free_tracks_shift_and_ctrl() {
+        let mut m = TriggerMachine::new();
+        assert!(m.modifiers_free());
+        press(&mut m, Key::ShiftLeft, T);
+        assert!(!m.modifiers_free());
+        release(&mut m, Key::ShiftLeft, T + 10);
+        assert!(m.modifiers_free());
+        press(&mut m, Key::CtrlRight, T + 20);
+        assert!(!m.modifiers_free());
+        release(&mut m, Key::CtrlRight, T + 30);
+        assert!(m.modifiers_free());
+    }
+
+    #[test]
+    fn pending_fires_only_when_free_before_the_deadline() {
+        let gesture = Gesture {
+            kind: GestureKind::Word,
+            undo: false,
+        };
+        let pending = PendingGesture::new(gesture, T);
+        assert!(!pending.ready(T, false));
+        assert!(pending.ready(T, true));
+        assert!(pending.ready(T + PENDING_TIMEOUT_MS, true));
+        assert!(!pending.ready(T + PENDING_TIMEOUT_MS + 1, true));
+    }
+
+    #[test]
+    fn pending_expires_past_the_deadline() {
+        let gesture = Gesture {
+            kind: GestureKind::Selection,
+            undo: true,
+        };
+        let pending = PendingGesture::new(gesture, T);
+        assert!(!pending.expired(T));
+        assert!(!pending.expired(T + PENDING_TIMEOUT_MS));
+        assert!(pending.expired(T + PENDING_TIMEOUT_MS + 1));
+        assert_eq!(pending.kind, GestureKind::Selection);
+        assert!(pending.undo);
     }
 }
