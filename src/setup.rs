@@ -492,11 +492,11 @@ mod tests {
         let dest = dir.join("config.kdl");
         assert!(write_default_config(&dest).unwrap());
         assert_eq!(std::fs::read_to_string(&dest).unwrap(), DEFAULT_CONFIG);
-        std::fs::write(&dest, "layouts \"de\" \"fr\"\n").unwrap();
+        std::fs::write(&dest, "layout \"de\" \"fr\"\n").unwrap();
         assert!(!write_default_config(&dest).unwrap());
         assert_eq!(
             std::fs::read_to_string(&dest).unwrap(),
-            "layouts \"de\" \"fr\"\n"
+            "layout \"de\" \"fr\"\n"
         );
     }
 
@@ -664,11 +664,11 @@ mod tests {
         let (_root, paths) = test_paths("setup-rerun");
         let runner = FakeRunner::new();
         assert_eq!(run(Options::default(), &paths, &runner), 0);
-        std::fs::write(&paths.config_path, "layouts \"de\" \"fr\"\n").unwrap();
+        std::fs::write(&paths.config_path, "layout \"de\" \"fr\"\n").unwrap();
         assert_eq!(run(Options::default(), &paths, &runner), 0);
         assert_eq!(
             std::fs::read_to_string(&paths.config_path).unwrap(),
-            "layouts \"de\" \"fr\"\n"
+            "layout \"de\" \"fr\"\n"
         );
     }
 

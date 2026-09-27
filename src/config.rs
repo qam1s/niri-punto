@@ -3,7 +3,7 @@
 //! The core is one node in `$XDG_CONFIG_HOME/niri-punto/config.kdl`:
 //!
 //! ```kdl
-//! layouts "us" "ru"
+//! layout "us" "ru"
 //! ```
 //!
 //! Position in the pair maps to the niri layout index, so the order must
@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pair: position maps to the niri
 // layout index, so the order must match the `layout` line in your niri
 // config. `setup` never overwrites this file once created.
-layouts "us" "ru"
+layout "us" "ru"
 // Daemon-side binds in niri style: no niri binds needed. A bare `Mod`
 // is the lone-tap scope (`off` disables the tap); the rest are
 // modifiers-held-plus-key, one per scope from the table in README.
@@ -50,7 +50,7 @@ pub const RULE_FILE_NAME: &str = "70-niri-punto.rules";
 /// File name of the modules-load entry that pulls in `uinput` at boot.
 pub const MODULES_FILE_NAME: &str = "niri-punto.conf";
 
-/// Ordered layout pair from the `layouts` node.
+/// Ordered layout pair from the `layout` node.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct LayoutPair {
     pub first: String,
@@ -87,9 +87,9 @@ impl LayoutPair {
 pub enum ConfigError {
     /// The file is not valid KDL.
     Parse(String),
-    /// No `layouts` node present.
+    /// No `layout` node present.
     MissingLayouts,
-    /// More than one `layouts` node present.
+    /// More than one `layout` node present.
     DuplicateNode,
     /// The node does not hold exactly two layout codes.
     BadArity { found: usize },
@@ -101,6 +101,8 @@ pub enum ConfigError {
     BadTap(String),
     /// A `binds` entry is malformed (combo or action).
     BadBind(String),
+    /// The `layouts` node was renamed to `layout`.
+    RenamedLayouts,
     /// The `double-shift` node holds a bad action.
     BadDoubleShift(String),
     /// The `timings` block is malformed (keys or values).
@@ -114,12 +116,18 @@ impl fmt::Display for ConfigError {
         match self {
             Self::Parse(message) => write!(f, "invalid KDL: {message}"),
             Self::MissingLayouts => {
-                write!(f, "missing `layouts` node (want `layouts \"us\" \"ru\"`)")
+                write!(f, "missing `layout` node (want `layout \"us\" \"ru\"`)")
             }
-            Self::DuplicateNode => write!(f, "more than one `layouts` node: keep exactly one"),
+            Self::RenamedLayouts => {
+                write!(
+                    f,
+                    "`layouts` was renamed to `layout` (e.g. `layout \"us\" \"ru\"`)"
+                )
+            }
+            Self::DuplicateNode => write!(f, "more than one `layout` node: keep exactly one"),
             Self::BadArity { found } => write!(
                 f,
-                "`layouts` needs exactly two codes, found {found} (want `layouts \"us\" \"ru\"`)"
+                "`layout` needs exactly two codes, found {found} (want `layout \"us\" \"ru\"`)"
             ),
             Self::EmptyCode => write!(f, "layout codes must be non-empty"),
             Self::Duplicate(code) => write!(f, "layout codes must differ, both are \"{code}\""),
@@ -146,12 +154,19 @@ pub fn parse(text: &str) -> Result<LayoutPair, ConfigError> {
     let document: kdl::KdlDocument = text
         .parse()
         .map_err(|error: kdl::KdlError| ConfigError::Parse(error.to_string()))?;
-    let mut layouts = document
+    if document
         .nodes()
         .iter()
-        .filter(|node| node.name().value() == "layouts");
-    let node = layouts.next().ok_or(ConfigError::MissingLayouts)?;
-    if layouts.next().is_some() {
+        .any(|node| node.name().value() == "layouts")
+    {
+        return Err(ConfigError::RenamedLayouts);
+    }
+    let mut layout = document
+        .nodes()
+        .iter()
+        .filter(|node| node.name().value() == "layout");
+    let node = layout.next().ok_or(ConfigError::MissingLayouts)?;
+    if layout.next().is_some() {
         return Err(ConfigError::DuplicateNode);
     }
     // Strict shape: exactly two positional string arguments, no
@@ -541,6 +556,7 @@ fn with_path(path: &Path, error: ConfigError) -> ConfigError {
         | ConfigError::BadTap(_)
         | ConfigError::BadBind(_)
         | ConfigError::BadDoubleShift(_)
+        | ConfigError::RenamedLayouts
         | ConfigError::BadTimings(_) => ConfigError::Io(format!("{}: {error}", path.display())),
         ConfigError::Io(_) => error,
     }
@@ -552,7 +568,7 @@ mod tests {
 
     #[test]
     fn parses_the_documented_pair() {
-        let pair = parse("layouts \"us\" \"ru\"\n").unwrap();
+        let pair = parse("layout \"us\" \"ru\"\n").unwrap();
         assert_eq!(pair.first, "us");
         assert_eq!(pair.second, "ru");
     }
@@ -572,7 +588,7 @@ mod tests {
     #[test]
     fn comments_and_unknown_nodes_are_ignored() {
         let pair =
-            parse("// leading comment\nlayouts \"us\" \"ru\" // trailing\nbind \"x\"\n").unwrap();
+            parse("// leading comment\nlayout \"us\" \"ru\" // trailing\nbind \"x\"\n").unwrap();
         assert_eq!(pair.first, "us");
     }
 
@@ -585,7 +601,7 @@ mod tests {
     #[test]
     fn duplicate_node_reports() {
         assert_eq!(
-            parse("layouts \"us\" \"ru\"\nlayouts \"us\" \"de\"\n"),
+            parse("layout \"us\" \"ru\"\nlayout \"us\" \"de\"\n"),
             Err(ConfigError::DuplicateNode)
         );
     }
@@ -593,20 +609,28 @@ mod tests {
     #[test]
     fn wrong_arity_reports_count() {
         assert_eq!(
-            parse("layouts \"us\"\n"),
+            parse("layout \"us\"\n"),
             Err(ConfigError::BadArity { found: 1 })
         );
         assert_eq!(
-            parse("layouts \"us\" \"ru\" \"de\"\n"),
+            parse("layout \"us\" \"ru\" \"de\"\n"),
             Err(ConfigError::BadArity { found: 3 })
         );
-        assert_eq!(parse("layouts\n"), Err(ConfigError::BadArity { found: 0 }));
+        assert_eq!(parse("layout\n"), Err(ConfigError::BadArity { found: 0 }));
+    }
+
+    #[test]
+    fn old_layouts_node_fails_with_rename_hint() {
+        assert_eq!(
+            parse("layouts \"us\" \"ru\"\n"),
+            Err(ConfigError::RenamedLayouts)
+        );
     }
 
     #[test]
     fn non_string_arguments_report_arity() {
         assert_eq!(
-            parse("layouts \"us\" 42\n"),
+            parse("layout \"us\" 42\n"),
             Err(ConfigError::BadArity { found: 2 })
         );
     }
@@ -618,9 +642,9 @@ mod tests {
 
     #[test]
     fn empty_or_equal_codes_are_rejected() {
-        assert_eq!(parse("layouts \"\" \"ru\"\n"), Err(ConfigError::EmptyCode));
+        assert_eq!(parse("layout \"\" \"ru\"\n"), Err(ConfigError::EmptyCode));
         assert_eq!(
-            parse("layouts \"us\" \"us\"\n"),
+            parse("layout \"us\" \"us\"\n"),
             Err(ConfigError::Duplicate("us".to_string()))
         );
     }
@@ -628,7 +652,7 @@ mod tests {
     #[test]
     fn invalid_kdl_reports_parse_error() {
         assert!(matches!(
-            parse("layouts \"us\"\nlayouts\n\"dangling"),
+            parse("layout \"us\"\nlayouts\n\"dangling"),
             Err(ConfigError::Parse(_))
         ));
     }
@@ -659,7 +683,7 @@ mod tests {
 
     #[test]
     fn settings_default_to_tap_word_without_binds() {
-        let settings = parse_settings("layouts \"us\" \"ru\"\n").unwrap();
+        let settings = parse_settings("layout \"us\" \"ru\"\n").unwrap();
         assert_eq!(settings.tap_action, Some(GestureKind::Word));
         assert!(settings.binds.is_empty());
         assert_eq!(settings.pair_base, GestureKind::Word);
@@ -679,40 +703,40 @@ mod tests {
     #[test]
     fn bare_mod_sets_tap_action() {
         let settings =
-            parse_settings("layouts \"us\" \"ru\"\nbinds {\n Mod selection\n}\n").unwrap();
+            parse_settings("layout \"us\" \"ru\"\nbinds {\n Mod selection\n}\n").unwrap();
         assert_eq!(settings.tap_action, Some(GestureKind::Selection));
         assert!(settings.binds.is_empty());
     }
 
     #[test]
     fn bare_mod_off_disables_tap() {
-        let settings = parse_settings("layouts \"us\" \"ru\"\nbinds {\n Mod off\n}\n").unwrap();
+        let settings = parse_settings("layout \"us\" \"ru\"\nbinds {\n Mod off\n}\n").unwrap();
         assert_eq!(settings.tap_action, None);
     }
 
     #[test]
     fn tap_node_fails_with_migration_hint() {
-        let error = parse_settings("layouts \"us\" \"ru\"\ntap \"meta\"\n").unwrap_err();
+        let error = parse_settings("layout \"us\" \"ru\"\ntap \"meta\"\n").unwrap_err();
         assert!(error.to_string().contains("bare-`Mod`"), "{error}");
     }
 
     #[test]
     fn duplicate_bare_mod_fails() {
         assert!(
-            parse_settings("layouts \"us\" \"ru\"\nbinds {\n Mod word\n Mod selection\n}\n")
+            parse_settings("layout \"us\" \"ru\"\nbinds {\n Mod word\n Mod selection\n}\n")
                 .is_err()
         );
     }
 
     #[test]
     fn bare_non_mod_fails() {
-        assert!(parse_settings("layouts \"us\" \"ru\"\nbinds {\n Shift word\n}\n").is_err());
+        assert!(parse_settings("layout \"us\" \"ru\"\nbinds {\n Shift word\n}\n").is_err());
     }
 
     #[test]
     fn modifier_key_expands_to_both_sides() {
         let settings =
-            parse_settings("layouts \"us\" \"ru\"\nbinds {\n Mod+Shift selection\n}\n").unwrap();
+            parse_settings("layout \"us\" \"ru\"\nbinds {\n Mod+Shift selection\n}\n").unwrap();
         assert_eq!(settings.binds.len(), 2);
         assert_eq!(
             settings.binds[0].scancode,
@@ -727,21 +751,20 @@ mod tests {
 
     #[test]
     fn double_shift_parses_and_defaults_to_word() {
-        let settings = parse_settings("layouts \"us\" \"ru\"\n").unwrap();
+        let settings = parse_settings("layout \"us\" \"ru\"\n").unwrap();
         assert_eq!(settings.pair_base, GestureKind::Word);
-        let settings = parse_settings("layouts \"us\" \"ru\"\ndouble-shift selection\n").unwrap();
+        let settings = parse_settings("layout \"us\" \"ru\"\ndouble-shift selection\n").unwrap();
         assert_eq!(settings.pair_base, GestureKind::Selection);
-        assert!(parse_settings("layouts \"us\" \"ru\"\ndouble-shift turbo\n").is_err());
+        assert!(parse_settings("layout \"us\" \"ru\"\ndouble-shift turbo\n").is_err());
         assert!(
-            parse_settings("layouts \"us\" \"ru\"\ndouble-shift word\ndouble-shift word\n")
-                .is_err()
+            parse_settings("layout \"us\" \"ru\"\ndouble-shift word\ndouble-shift word\n").is_err()
         );
     }
 
     #[test]
     fn binds_parse_all_actions() {
         let settings = parse_settings(
-            "layouts \"us\" \"ru\"\nbinds {\n Mod+L word\n Mod+S selection\n Mod+Shift+P phrase\n}\n",
+            "layout \"us\" \"ru\"\nbinds {\n Mod+L word\n Mod+S selection\n Mod+Shift+P phrase\n}\n",
         )
         .unwrap();
         assert_eq!(settings.binds.len(), 3);
@@ -755,7 +778,7 @@ mod tests {
 
     #[test]
     fn binds_accept_lowercase_modifiers() {
-        let settings = parse_settings("layouts \"us\" \"ru\"\nbinds {\n mod+l word\n}\n").unwrap();
+        let settings = parse_settings("layout \"us\" \"ru\"\nbinds {\n mod+l word\n}\n").unwrap();
         assert!(settings.binds[0].mods.meta);
     }
 
@@ -773,7 +796,7 @@ mod tests {
             "binds {\n Mod+L word\n}\nbinds {\n Mod+S selection\n}\n",
             "binds Mod+L\n",
         ] {
-            let text = format!("layouts \"us\" \"ru\"\n{block}");
+            let text = format!("layout \"us\" \"ru\"\n{block}");
             assert!(parse_settings(&text).is_err(), "{block}");
         }
     }
@@ -781,20 +804,20 @@ mod tests {
     #[test]
     fn chord_lines_fail_with_migration_hint() {
         let error =
-            parse_settings("layouts \"us\" \"ru\"\nchord \"meta+l\" \"word\"\n").unwrap_err();
+            parse_settings("layout \"us\" \"ru\"\nchord \"meta+l\" \"word\"\n").unwrap_err();
         assert!(error.to_string().contains("binds"), "{error}");
     }
 
     #[test]
     fn timings_default_without_block() {
-        let settings = parse_settings("layouts \"us\" \"ru\"\n").unwrap();
+        let settings = parse_settings("layout \"us\" \"ru\"\n").unwrap();
         assert_eq!(settings.timing, TimingConfig::default());
     }
 
     #[test]
     fn timings_full_block_parses() {
         let settings = parse_settings(
-            "layouts \"us\" \"ru\"\ntimings {\n double-shift-ms 1000\n undo-ms 2000\n debounce-ms 10\n pending-ms 500\n tap-ms 200\n}\n",
+            "layout \"us\" \"ru\"\ntimings {\n double-shift-ms 1000\n undo-ms 2000\n debounce-ms 10\n pending-ms 500\n tap-ms 200\n}\n",
         )
         .unwrap();
         assert_eq!(
@@ -811,7 +834,7 @@ mod tests {
 
     #[test]
     fn timings_partial_block_keeps_defaults() {
-        let settings = parse_settings("layouts \"us\" \"ru\"\ntimings { tap-ms 200 }\n").unwrap();
+        let settings = parse_settings("layout \"us\" \"ru\"\ntimings { tap-ms 200 }\n").unwrap();
         assert_eq!(settings.timing.tap_ms, 200);
         assert_eq!(
             settings.timing,
@@ -835,7 +858,7 @@ mod tests {
             "timings { tap-ms 100 }\ntimings { tap-ms 200 }\n",
             "timings 100\n",
         ] {
-            let text = format!("layouts \"us\" \"ru\"\n{block}");
+            let text = format!("layout \"us\" \"ru\"\n{block}");
             assert!(parse_settings(&text).is_err(), "{block}");
         }
     }
@@ -851,7 +874,7 @@ mod tests {
         let dir = std::env::temp_dir().join("niri-punto-test-config");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("bad-config-test.kdl");
-        std::fs::write(&path, "layouts \"only-one\"\n").unwrap();
+        std::fs::write(&path, "layout \"only-one\"\n").unwrap();
         let error = load_from(&path).unwrap_err();
         assert!(error.to_string().contains("bad-config-test.kdl"), "{error}");
         std::fs::remove_file(&path).ok();
