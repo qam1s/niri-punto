@@ -76,15 +76,19 @@ timings {
 
 Layout switched between typing and triggering (you typed `ghbdtn` in us,
 something flipped to ru before you hit the trigger): the daemon reads the
-typed text itself, not the current layout indicator. When it is confident
-about the intended layout it converts toward that layout, ignoring which
-one is current. When it is unsure it keeps the old behavior and converts
-away from the current layout. Unsure inputs are short text (fewer than 3
-letters and spaces), mixed-language phrases, and code-like tokens (`http`,
-`cfg`): those fall back to the current-layout behavior. Latin input that
-scores strongly as Latin (`api`, `spasibo`) verdicts the Latin side instead:
-that conversion is a no-op, while falling back could convert toward Cyrillic
-after an external switch.
+typed text itself, not the current layout indicator. It remembers which
+layout was active when you started typing. When that layout moved since
+(a switch happened), a confident read of the text sets the target and the
+screen text gets fixed. When nothing moved, the trigger converts away
+from the current layout, like it always did — even when the text reads as
+the current language (`api` typed in us still converts away on trigger).
+
+When the read is unsure it also converts away from the current layout.
+Unsure inputs are short text (fewer than 3 scorable characters), mixed
+phrases, and code-like tokens (`http`, `cfg`).
+
+Remembered input belongs to one window: switching windows forgets it, so
+a trigger never replays text typed elsewhere.
 
 ## Development
 
