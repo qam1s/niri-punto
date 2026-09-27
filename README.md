@@ -15,7 +15,7 @@ keyboard keeps working.
 ## Install
 
 Requirements: [niri](https://github.com/niri-wm/niri),
-[`wl-clipboard`](https://github.com/bugaevc/wl-clipboard).
+[wl-clipboard](https://github.com/bugaevc/wl-clipboard).
 
 1. Download `niri-punto-<version>-x86_64-unknown-linux-gnu.tar.gz` from the
    [Releases page](https://github.com/qam1s/niri-punto/releases) and verify
@@ -25,16 +25,23 @@ Requirements: [niri](https://github.com/niri-wm/niri),
    modules-load entry and the driver load need root — `setup` escalates
    just those steps (or pass `--no-udev` and install them by hand).
 
+Or via cargo (needs a Rust toolchain):
+
+```sh
+cargo install --git https://github.com/qam1s/niri-punto --locked
+niri-punto setup
+```
+
 ## Usage
 
-| Gesture              | Action                            |
-| -------------------- | --------------------------------- |
-| Double Shift         | Convert last word                 |
+| Gesture              | Action                                       |
+| -------------------- | -------------------------------------------- |
+| Double Shift         | Convert last word                            |
 | Mod tap              | Convert last word (switch layout when empty) |
-| Shift + Double Shift | Convert phrase                    |
-| Ctrl + Double Shift  | Convert selection (via clipboard) |
-| Ctrl + Mod tap       | Convert selection (via clipboard) |
-| Repeat gesture       | Undo                              |
+| Shift + Double Shift | Convert phrase                               |
+| Ctrl + Double Shift  | Convert selection (via clipboard)            |
+| Ctrl + Mod tap       | Convert selection (via clipboard)            |
+| Repeat gesture       | Undo                                         |
 
 Prefer key binds? Put them in the punto config instead — daemon-side
 chords need no niri binds and scope exactly:
