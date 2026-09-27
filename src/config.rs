@@ -28,7 +28,7 @@ layout "us" "ru"
 binds {
     Mod word
     Mod+L phrase
-    double-shift selection
+    Double-Shift selection
 }
 // Trigger timings in milliseconds: absent keys mean these defaults.
 timings {
@@ -246,9 +246,9 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
                     "`chord` lines were replaced by the `binds` block (e.g. `binds { Mod+L word }`)".to_string(),
                 ));
             }
-            "double-shift" => {
+            name if name.eq_ignore_ascii_case("double-shift") => {
                 return Err(ConfigError::BadDoubleShift(
-                    "`double-shift` moved inside the `binds` block (e.g. `binds { double-shift selection }`)".to_string(),
+                    "`Double-Shift` moved inside the `binds` block (e.g. `binds { Double-Shift selection }`)".to_string(),
                 ));
             }
             "timings" => {
@@ -783,6 +783,19 @@ mod tests {
     fn top_level_double_shift_fails_with_migration_hint() {
         let error = parse_settings("layout \"us\" \"ru\"\ndouble-shift selection\n").unwrap_err();
         assert!(error.to_string().contains("binds"), "{error}");
+    }
+
+    #[test]
+    fn top_level_double_shift_hint_is_case_insensitive() {
+        let error = parse_settings("layout \"us\" \"ru\"\nDouble-Shift selection\n").unwrap_err();
+        assert!(error.to_string().contains("binds"), "{error}");
+    }
+
+    #[test]
+    fn binds_accept_capitalized_double_shift() {
+        let settings =
+            parse_settings("layout \"us\" \"ru\"\nbinds {\n Double-Shift selection\n}\n").unwrap();
+        assert_eq!(settings.pair_base, GestureKind::Selection);
     }
 
     #[test]
