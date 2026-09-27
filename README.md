@@ -14,8 +14,8 @@ keyboard keeps working.
 
 ## Install
 
-Requirements: niri, `wl-clipboard`, systemd user
-session.
+Requirements: [niri](https://github.com/niri-wm/niri),
+[`wl-clipboard`](https://github.com/bugaevc/wl-clipboard).
 
 1. Download `niri-punto-<version>-x86_64-unknown-linux-gnu.tar.gz` from the
    [Releases page](https://github.com/qam1s/niri-punto/releases) and verify
@@ -24,8 +24,6 @@ session.
    (binary, systemd unit, default config); only the udev rule for device
    access needs root — `setup` escalates just that step (or pass `--no-udev`
    and install the rule by hand).
-
-No compiler, no AUR helper needed.
 
 ## Usage
 
