@@ -44,7 +44,7 @@ use selection::{SelectionConverter, SelectionPlan};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use trigger::{Gesture, GestureKind, PendingGesture, TriggerMachine};
+use trigger::{Chord, Gesture, GestureKind, PendingGesture, TriggerMachine};
 
 /// How often the main loop wakes to serve control-socket bind requests.
 const CONTROL_POLL: Duration = Duration::from_millis(100);
@@ -333,12 +333,24 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
         eprintln!("control: listener thread failed; binds will not work");
     }
 
-    let pair = match config_override {
-        Some(path) => config::load_from(&path),
+    let pair = match &config_override {
+        Some(path) => config::load_from(path),
         None => config::load(),
     };
     let pair = match pair {
         Ok(pair) => pair,
+        Err(error) => {
+            eprintln!("config: {error}");
+            eprintln!("hint: run `niri-punto setup` to write the default config");
+            std::process::exit(1);
+        }
+    };
+    let settings = match &config_override {
+        Some(path) => config::load_settings_from(path),
+        None => config::load_settings(),
+    };
+    let settings = match settings {
+        Ok(settings) => settings,
         Err(error) => {
             eprintln!("config: {error}");
             eprintln!("hint: run `niri-punto setup` to write the default config");
@@ -373,6 +385,8 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
 
     let start = Instant::now();
     let mut triggers = TriggerMachine::new();
+    triggers.set_tap(settings.tap);
+    triggers.set_chords(settings.chords);
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new(pair.clone());
     let mut selection_converter = SelectionConverter::new(pair);
@@ -544,7 +558,16 @@ fn handle_key_at(
     } = daemon;
     let key = reader::classify(raw.scancode);
 
-    if reader::is_typing_key(key, raw.value) {
+    // Daemon-side chords (config `chord` lines): Meta held + key press.
+    // The chord key is the trigger, not text: unlike niri-bind keys it
+    // skips the buffer, so the converted scope stays exact.
+    let chord = (raw.value == 1 && triggers.meta_held())
+        .then(|| triggers.chord(raw.scancode, now_ms))
+        .flatten();
+    if let Some(gesture) = chord {
+        // Latest gesture wins: it supersedes anything still waiting.
+        *pending = Some(PendingGesture::new(gesture, now_ms));
+    } else if reader::is_typing_key(key, raw.value) {
         // New physical input cancels a pending undo: "repeat" only undoes
         // an immediately preceding conversion. It also cancels a gesture
         // still waiting for modifiers: the context moved on.
@@ -931,6 +954,45 @@ mod tests {
         h.at(T + 600, SUPER, 0); // release Mod: the staged request fires
         assert_eq!(h.ipc.switches, vec![1]);
         assert_eq!(h.injector.erases, vec![6]);
+    }
+
+    #[test]
+    fn chord_converts_word_with_exact_scope() {
+        let mut h = Harness::new();
+        h.triggers.set_chords(vec![Chord {
+            scancode: 38,
+            kind: GestureKind::Word,
+        }]);
+        h.type_word(T);
+        h.at(T + 500, SUPER, 1);
+        h.at(T + 550, 38, 1);
+        h.at(T + 560, 38, 0);
+        // Meta still held: staged, nothing fires yet.
+        assert!(h.ipc.switches.is_empty());
+        h.at(T + 600, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        // The chord key is the trigger, not text: exactly the typed word.
+        assert_eq!(h.injector.erases, vec![6]);
+    }
+
+    #[test]
+    fn repeated_chord_undoes() {
+        let mut h = Harness::new();
+        h.triggers.set_chords(vec![Chord {
+            scancode: 38,
+            kind: GestureKind::Word,
+        }]);
+        h.type_word(T);
+        h.at(T + 500, SUPER, 1);
+        h.at(T + 550, 38, 1);
+        h.at(T + 560, 38, 0);
+        h.at(T + 600, SUPER, 0);
+        h.at(T + 900, SUPER, 1);
+        h.at(T + 950, 38, 1);
+        h.at(T + 960, 38, 0);
+        h.at(T + 1000, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1, 0]);
+        assert_eq!(h.injector.erases, vec![6, 6]);
     }
 
     #[test]

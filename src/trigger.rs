@@ -26,6 +26,25 @@ pub enum Key {
     Other,
 }
 
+/// Which modifier (if any) converts on a lone tap. From the config `tap`
+/// node; absent means [`TapMode::Meta`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum TapMode {
+    /// Lone Meta tap converts (Ctrl+tap selects).
+    #[default]
+    Meta,
+    /// No tap trigger.
+    Off,
+}
+
+/// A daemon-side chord from a config `chord` line: the modifier is always
+/// Meta for now, so only the key scancode and the scope travel here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Chord {
+    pub scancode: u16,
+    pub kind: GestureKind,
+}
+
 /// Which conversion scope a trigger asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GestureKind {
@@ -117,6 +136,8 @@ pub struct TriggerMachine {
     meta_release_ms: [Option<u64>; 2],
     tap_press_ms: Option<u64>,
     tap_disturbed: bool,
+    tap: TapMode,
+    chords: Vec<Chord>,
     last_gesture: Option<(GestureKind, u64)>,
 }
 
@@ -132,6 +153,8 @@ impl TriggerMachine {
             meta_release_ms: [None, None],
             tap_press_ms: None,
             tap_disturbed: false,
+            tap: TapMode::Meta,
+            chords: Vec::new(),
             last_gesture: None,
         }
     }
@@ -151,6 +174,30 @@ impl TriggerMachine {
     /// in the compositor's binds instead of the text field.
     pub fn meta_held(&self) -> bool {
         self.meta_down[0] || self.meta_down[1]
+    }
+
+    /// Tap trigger mode from the config (`tap "meta"` by default).
+    pub fn set_tap(&mut self, tap: TapMode) {
+        self.tap = tap;
+    }
+
+    /// Daemon-side chords from the config (`chord` lines).
+    pub fn set_chords(&mut self, chords: Vec<Chord>) {
+        self.chords = chords;
+    }
+
+    /// A configured chord key pressed with Meta held. The caller checks
+    /// [`TriggerMachine::meta_held`] and press (not autorepeat) first;
+    /// undo accounting rides the shared gesture chain, like taps.
+    pub fn chord(&mut self, scancode: u16, now_ms: u64) -> Option<Gesture> {
+        let kind = self
+            .chords
+            .iter()
+            .find(|chord| chord.scancode == scancode)?
+            .kind;
+        let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= UNDO_WINDOW_MS);
+        self.last_gesture = Some((kind, now_ms));
+        Some(Gesture { kind, undo })
     }
 
     /// No Shift, Ctrl, or Mod held anywhere: replaying scancodes now renders
@@ -255,22 +302,25 @@ impl TriggerMachine {
         } else {
             self.meta_down[i] = false;
             self.meta_release_ms[i] = Some(now_ms);
-            let tap = match self.tap_press_ms {
-                Some(pressed_at)
-                    if !self.tap_disturbed
-                        && !self.shift_held()
-                        && now_ms.saturating_sub(pressed_at) <= TAP_WINDOW_MS =>
-                {
-                    let kind = if self.ctrl_held() {
-                        GestureKind::Selection
-                    } else {
-                        GestureKind::Word
-                    };
-                    let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= UNDO_WINDOW_MS);
-                    self.last_gesture = Some((kind, now_ms));
-                    Some(Gesture { kind, undo })
-                }
-                _ => None,
+            let tap = match self.tap {
+                TapMode::Off => None,
+                TapMode::Meta => match self.tap_press_ms {
+                    Some(pressed_at)
+                        if !self.tap_disturbed
+                            && !self.shift_held()
+                            && now_ms.saturating_sub(pressed_at) <= TAP_WINDOW_MS =>
+                    {
+                        let kind = if self.ctrl_held() {
+                            GestureKind::Selection
+                        } else {
+                            GestureKind::Word
+                        };
+                        let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= UNDO_WINDOW_MS);
+                        self.last_gesture = Some((kind, now_ms));
+                        Some(Gesture { kind, undo })
+                    }
+                    _ => None,
+                },
             };
             self.tap_press_ms = None;
             self.tap_disturbed = false;
@@ -637,6 +687,49 @@ mod tests {
                 undo: false
             })
         ));
+    }
+
+    #[test]
+    fn tap_off_disables_mod_tap() {
+        let mut m = TriggerMachine::new();
+        m.set_tap(TapMode::Off);
+        assert_eq!(press(&mut m, Key::MetaLeft, T), None);
+        assert_eq!(release(&mut m, Key::MetaLeft, T + 100), None);
+    }
+
+    #[test]
+    fn chord_fires_for_configured_scancode() {
+        let mut m = TriggerMachine::new();
+        m.set_chords(vec![Chord {
+            scancode: 38,
+            kind: GestureKind::Word,
+        }]);
+        let g = m.chord(38, T);
+        assert_eq!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Word,
+                undo: false
+            })
+        );
+        assert_eq!(m.chord(30, T + 10), None);
+    }
+
+    #[test]
+    fn repeated_chord_undoes() {
+        let mut m = TriggerMachine::new();
+        m.set_chords(vec![Chord {
+            scancode: 38,
+            kind: GestureKind::Word,
+        }]);
+        assert!(matches!(m.chord(38, T), Some(Gesture { undo: false, .. })));
+        assert_eq!(
+            m.chord(38, T + 500),
+            Some(Gesture {
+                kind: GestureKind::Word,
+                undo: true
+            })
+        );
     }
 
     #[test]

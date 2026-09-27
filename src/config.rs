@@ -11,6 +11,8 @@
 //! pure and unit-tested; only the path helpers and file reads touch the
 //! environment.
 
+use crate::reader;
+use crate::trigger::{Chord, GestureKind, TapMode};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,6 +22,11 @@ pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pai
 // layout index, so the order must match the `layout` line in your niri
 // config. `setup` never overwrites this file once created.
 layouts "us" "ru"
+// Lone Mod tap trigger: "meta" converts on tap, "off" disables it.
+tap "meta"
+// Daemon-side chords (Meta held + key): no niri binds needed. Examples:
+// chord "meta+l" "word"
+// chord "meta+s" "selection"
 "#;
 
 /// File name of the udev rule, shared with `setup` and `doctor`. The `70-`
@@ -78,6 +85,10 @@ pub enum ConfigError {
     EmptyCode,
     /// Both codes are identical.
     Duplicate(String),
+    /// The `tap` node is repeated or holds a bad value.
+    BadTap(String),
+    /// A `chord` node is malformed (combo or action).
+    BadChord(String),
     /// File I/O failed (missing file, permissions).
     Io(String),
 }
@@ -96,6 +107,8 @@ impl fmt::Display for ConfigError {
             ),
             Self::EmptyCode => write!(f, "layout codes must be non-empty"),
             Self::Duplicate(code) => write!(f, "layout codes must differ, both are \"{code}\""),
+            Self::BadTap(message) => write!(f, "bad `tap` node: {message}"),
+            Self::BadChord(message) => write!(f, "bad `chord` node: {message}"),
             Self::Io(message) => write!(f, "{message}"),
         }
     }
@@ -147,6 +160,99 @@ pub fn parse(text: &str) -> Result<LayoutPair, ConfigError> {
     LayoutPair::new(codes[0], codes[1])
 }
 
+/// Trigger settings from the optional `tap` node and repeatable `chord`
+/// nodes. Missing nodes mean defaults (tap on, no chords), so config files
+/// written before these nodes existed keep working.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct TriggerSettings {
+    pub tap: TapMode,
+    pub chords: Vec<Chord>,
+}
+
+/// Parse trigger settings. Unknown nodes are ignored, like in [`parse`].
+pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
+    let document: kdl::KdlDocument = text
+        .parse()
+        .map_err(|error: kdl::KdlError| ConfigError::Parse(error.to_string()))?;
+    let mut settings = TriggerSettings::default();
+    let mut tap_seen = false;
+    for node in document.nodes() {
+        match node.name().value() {
+            "tap" => {
+                if tap_seen {
+                    return Err(ConfigError::BadTap(
+                        "more than one `tap` node: keep exactly one".to_string(),
+                    ));
+                }
+                tap_seen = true;
+                settings.tap = parse_tap(node)?;
+            }
+            "chord" => settings.chords.push(parse_chord(node)?),
+            _ => {}
+        }
+    }
+    Ok(settings)
+}
+
+fn node_args(node: &kdl::KdlNode) -> Option<Vec<&str>> {
+    let mut args = Vec::with_capacity(node.entries().len());
+    for entry in node.entries() {
+        let arg = (entry.name().is_none())
+            .then(|| match entry.value() {
+                kdl::KdlValue::String(arg) => Some(arg.as_str()),
+                _ => None,
+            })
+            .flatten()?;
+        args.push(arg);
+    }
+    Some(args)
+}
+
+fn parse_tap(node: &kdl::KdlNode) -> Result<TapMode, ConfigError> {
+    match node_args(node).as_deref() {
+        Some(["meta"]) => Ok(TapMode::Meta),
+        Some(["off"]) => Ok(TapMode::Off),
+        _ => Err(ConfigError::BadTap(
+            "want exactly one of `meta`, `off` (e.g. `tap \"meta\"`)".to_string(),
+        )),
+    }
+}
+
+fn parse_chord(node: &kdl::KdlNode) -> Result<Chord, ConfigError> {
+    let (combo, action) = match node_args(node).as_deref() {
+        Some([combo, action]) => (*combo, *action),
+        _ => {
+            return Err(ConfigError::BadChord(
+                "want a combo and an action (e.g. `chord \"meta+l\" \"word\"`)".to_string(),
+            ));
+        }
+    };
+    let name = match combo.split_once('+') {
+        Some(("meta", name)) => name,
+        _ => {
+            return Err(ConfigError::BadChord(format!(
+                "bad combo {combo:?}: want `meta+<key>`"
+            )));
+        }
+    };
+    let Some(scancode) = reader::scancode_by_name(name) else {
+        return Err(ConfigError::BadChord(format!(
+            "unknown key {name:?}: want a letter or digit"
+        )));
+    };
+    let kind = match action {
+        "word" => GestureKind::Word,
+        "phrase" => GestureKind::Phrase,
+        "selection" => GestureKind::Selection,
+        _ => {
+            return Err(ConfigError::BadChord(format!(
+                "bad action {action:?}: want `word`, `phrase`, or `selection`"
+            )));
+        }
+    };
+    Ok(Chord { scancode, kind })
+}
+
 /// Config path for explicit homes. Pure: the env-reading wrapper is
 /// [`config_path`].
 pub fn config_path_for(home: &Path, xdg_config_home: Option<&str>) -> PathBuf {
@@ -169,22 +275,44 @@ pub fn config_path() -> PathBuf {
 
 /// Read and parse the config at `path`.
 pub fn load_from(path: &Path) -> Result<LayoutPair, ConfigError> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|error| ConfigError::Io(format!("cannot read {}: {error}", path.display())))?;
-    parse(&text).map_err(|error| match error {
-        ConfigError::Parse(_)
-        | ConfigError::MissingLayouts
-        | ConfigError::DuplicateNode
-        | ConfigError::BadArity { .. }
-        | ConfigError::EmptyCode
-        | ConfigError::Duplicate(_) => ConfigError::Io(format!("{}: {error}", path.display())),
-        ConfigError::Io(_) => error,
-    })
+    let text = read_text(path)?;
+    parse(&text).map_err(|error| with_path(path, error))
 }
 
 /// Read and parse the default-location config.
 pub fn load() -> Result<LayoutPair, ConfigError> {
     load_from(&config_path())
+}
+
+/// Read and parse trigger settings at `path`.
+pub fn load_settings_from(path: &Path) -> Result<TriggerSettings, ConfigError> {
+    let text = read_text(path)?;
+    parse_settings(&text).map_err(|error| with_path(path, error))
+}
+
+/// Read and parse trigger settings at the default location.
+pub fn load_settings() -> Result<TriggerSettings, ConfigError> {
+    load_settings_from(&config_path())
+}
+
+fn read_text(path: &Path) -> Result<String, ConfigError> {
+    std::fs::read_to_string(path)
+        .map_err(|error| ConfigError::Io(format!("cannot read {}: {error}", path.display())))
+}
+
+/// Name the file in content errors, so a bad line is findable.
+fn with_path(path: &Path, error: ConfigError) -> ConfigError {
+    match error {
+        ConfigError::Parse(_)
+        | ConfigError::MissingLayouts
+        | ConfigError::DuplicateNode
+        | ConfigError::BadArity { .. }
+        | ConfigError::EmptyCode
+        | ConfigError::Duplicate(_)
+        | ConfigError::BadTap(_)
+        | ConfigError::BadChord(_) => ConfigError::Io(format!("{}: {error}", path.display())),
+        ConfigError::Io(_) => error,
+    }
 }
 
 #[cfg(test)]
@@ -296,6 +424,64 @@ mod tests {
             config_path_for(Path::new("/home/u"), Some("")),
             PathBuf::from("/home/u/.config/niri-punto/config.kdl")
         );
+    }
+
+    #[test]
+    fn settings_default_to_tap_on_without_chords() {
+        let settings = parse_settings("layouts \"us\" \"ru\"\n").unwrap();
+        assert_eq!(settings.tap, TapMode::Meta);
+        assert!(settings.chords.is_empty());
+    }
+
+    #[test]
+    fn default_config_settings_parse() {
+        let settings = parse_settings(DEFAULT_CONFIG).unwrap();
+        assert_eq!(settings.tap, TapMode::Meta);
+        assert!(settings.chords.is_empty());
+    }
+
+    #[test]
+    fn tap_off_parses() {
+        let settings = parse_settings("layouts \"us\" \"ru\"\ntap \"off\"\n").unwrap();
+        assert_eq!(settings.tap, TapMode::Off);
+    }
+
+    #[test]
+    fn tap_rejects_bad_values() {
+        assert!(parse_settings("layouts \"us\" \"ru\"\ntap \"alt\"\n").is_err());
+        assert!(parse_settings("layouts \"us\" \"ru\"\ntap\n").is_err());
+        assert!(parse_settings("layouts \"us\" \"ru\"\ntap \"meta\" \"off\"\n").is_err());
+        assert!(parse_settings("layouts \"us\" \"ru\"\ntap \"meta\"\ntap \"off\"\n").is_err());
+    }
+
+    #[test]
+    fn chords_parse_all_actions() {
+        let settings = parse_settings(
+            "layouts \"us\" \"ru\"\nchord \"meta+l\" \"word\"\nchord \"meta+s\" \"selection\"\nchord \"meta+p\" \"phrase\"\n",
+        )
+        .unwrap();
+        assert_eq!(settings.chords.len(), 3);
+        assert_eq!(settings.chords[0].scancode, 38);
+        assert_eq!(settings.chords[0].kind, GestureKind::Word);
+        assert_eq!(settings.chords[1].kind, GestureKind::Selection);
+        assert_eq!(settings.chords[2].kind, GestureKind::Phrase);
+    }
+
+    #[test]
+    fn chords_reject_bad_combos_and_actions() {
+        for node in [
+            "chord \"ctrl+l\" \"word\"\n",
+            "chord \"l\" \"word\"\n",
+            "chord \"meta+\" \"word\"\n",
+            "chord \"meta+space\" \"word\"\n",
+            "chord \"meta+L\" \"word\"\n",
+            "chord \"meta+l\" \"sentence\"\n",
+            "chord \"meta+l\"\n",
+            "chord \"meta+l\" \"word\" \"extra\"\n",
+        ] {
+            let text = format!("layouts \"us\" \"ru\"\n{node}");
+            assert!(parse_settings(&text).is_err(), "{node}");
+        }
     }
 
     #[test]

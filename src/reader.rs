@@ -66,6 +66,51 @@ pub fn is_reset(scancode: u16) -> bool {
     scancode == KeyCode::KEY_ESC.code()
 }
 
+/// Key name to scancode for `chord` combos: lowercase ASCII letters and
+/// top-row digits. Anything else is rejected at config load.
+pub fn scancode_by_name(name: &str) -> Option<u16> {
+    let code = match name {
+        "a" => KeyCode::KEY_A,
+        "b" => KeyCode::KEY_B,
+        "c" => KeyCode::KEY_C,
+        "d" => KeyCode::KEY_D,
+        "e" => KeyCode::KEY_E,
+        "f" => KeyCode::KEY_F,
+        "g" => KeyCode::KEY_G,
+        "h" => KeyCode::KEY_H,
+        "i" => KeyCode::KEY_I,
+        "j" => KeyCode::KEY_J,
+        "k" => KeyCode::KEY_K,
+        "l" => KeyCode::KEY_L,
+        "m" => KeyCode::KEY_M,
+        "n" => KeyCode::KEY_N,
+        "o" => KeyCode::KEY_O,
+        "p" => KeyCode::KEY_P,
+        "q" => KeyCode::KEY_Q,
+        "r" => KeyCode::KEY_R,
+        "s" => KeyCode::KEY_S,
+        "t" => KeyCode::KEY_T,
+        "u" => KeyCode::KEY_U,
+        "v" => KeyCode::KEY_V,
+        "w" => KeyCode::KEY_W,
+        "x" => KeyCode::KEY_X,
+        "y" => KeyCode::KEY_Y,
+        "z" => KeyCode::KEY_Z,
+        "0" => KeyCode::KEY_0,
+        "1" => KeyCode::KEY_1,
+        "2" => KeyCode::KEY_2,
+        "3" => KeyCode::KEY_3,
+        "4" => KeyCode::KEY_4,
+        "5" => KeyCode::KEY_5,
+        "6" => KeyCode::KEY_6,
+        "7" => KeyCode::KEY_7,
+        "8" => KeyCode::KEY_8,
+        "9" => KeyCode::KEY_9,
+        _ => return None,
+    };
+    Some(code.code())
+}
+
 /// Whether a device with this name must be skipped. The daemon's own
 /// future uinput device is matched by exact name; nameless devices are
 /// kept (real keyboards always report a name, and skipping them would
@@ -271,6 +316,18 @@ mod tests {
     fn escape_resets() {
         assert!(is_reset(KeyCode::KEY_ESC.code()));
         assert!(!is_reset(KeyCode::KEY_A.code()));
+    }
+
+    #[test]
+    fn key_names_map_to_scancodes() {
+        assert_eq!(scancode_by_name("a"), Some(KeyCode::KEY_A.code()));
+        assert_eq!(scancode_by_name("l"), Some(KeyCode::KEY_L.code()));
+        assert_eq!(scancode_by_name("z"), Some(KeyCode::KEY_Z.code()));
+        assert_eq!(scancode_by_name("0"), Some(KeyCode::KEY_0.code()));
+        assert_eq!(scancode_by_name("9"), Some(KeyCode::KEY_9.code()));
+        assert_eq!(scancode_by_name("L"), None);
+        assert_eq!(scancode_by_name("space"), None);
+        assert_eq!(scancode_by_name(""), None);
     }
 
     #[test]
