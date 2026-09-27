@@ -12,6 +12,14 @@ the same scancodes — they render in the new layout. Repeating the gesture
 undoes the conversion. It never grabs the keyboard: if the daemon dies, your
 keyboard keeps working.
 
+`niri-punto doctor` prints niri's layout names, the current index, and the resulting
+correspondence. With more than two system layouts, manual conversion
+works within the configured pair only. Each `binds` entry is the required
+modifiers (`Mod`, `Shift`, `Ctrl` — at least one) held plus the key press;
+key names are letters and digits. The bind key is the trigger, not text,
+so the converted scope stays exact. A bad file stops the daemon at start,
+like a bad `layout` node.
+
 ## Install
 
 Requirements: [niri](https://github.com/niri-wm/niri),
@@ -34,33 +42,29 @@ niri-punto setup
 
 ## Usage
 
-| Gesture        | Action                                   |
-| -------------- | ---------------------------------------- |
-| Mod            | Convert word or switch layout when empty |
-| Mod + Shift    | Convert phrase                           |
-| Double Shift   | Convert selection                        |
-| Repeat gesture | Undo                                     |
+| Gesture        | Action    | Description                              |
+| -------------- | --------- | ---------------------------------------- |
+| Mod            | word      | Convert word or switch layout when empty |
+| Mod + L        | phrase    | Convert phrase                           |
+| Double Shift   | selection | Convert selection                        |
+| Repeat gesture | undo      | Undo                                     |
 
 ## Config
 
 `setup` writes the default config to `~/.config/niri-punto/config.kdl`
 (`$XDG_CONFIG_HOME` respected when set) and never overwrites an existing
-file. The full default, line by line:
+file.
 
 ```kdl
-// Ordered layout pair: position maps to the niri layout index, so the
-// order must match the `layout` line in your niri config.
-layouts "us" "ru"
-// Lone Mod tap trigger: `meta` converts on tap, `off` disables it.
-tap "meta"
-// Daemon-side binds in niri style, one per scope from the table above:
-// Mod held + key press converts, with no niri binds needed.
+// Ordered layout pair must match the `layout` line in your niri config.
+layout "us" "ru"
+
 binds {
-    Mod+L word
-    Mod+P phrase
-    Mod+S selection
+    Mod word
+    Mod+L phrase
+    double-shift selection
 }
-// Trigger timings in milliseconds: absent keys mean these defaults.
+
 timings {
     double-shift-ms 400
     undo-ms 3000
@@ -69,14 +73,6 @@ timings {
     tap-ms 300
 }
 ```
-
-`doctor` prints niri's layout names, the current index, and the resulting
-correspondence. With more than two system layouts, manual conversion
-works within the configured pair only. Each `binds` entry is the required
-modifiers (`Mod`, `Shift`, `Ctrl` — at least one) held plus the key press;
-key names are letters and digits. The bind key is the trigger, not text,
-so the converted scope stays exact. A bad file stops the daemon at start,
-like a bad `layouts` node.
 
 ## License
 
