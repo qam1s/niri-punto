@@ -77,6 +77,10 @@ pub const PENDING_TIMEOUT_MS: u64 = 2000;
 pub struct PendingGesture {
     pub kind: GestureKind,
     pub undo: bool,
+    /// True when the gesture completed on a lone Mod release. The Word
+    /// branch reads it: a tap with no text toggles the layout instead of
+    /// converting.
+    pub tap: bool,
     deadline_ms: u64,
 }
 
@@ -85,6 +89,7 @@ impl PendingGesture {
         Self {
             kind: gesture.kind,
             undo: gesture.undo,
+            tap: false,
             deadline_ms: now_ms.saturating_add(PENDING_TIMEOUT_MS),
         }
     }

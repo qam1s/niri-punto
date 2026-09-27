@@ -30,7 +30,7 @@ Requirements: [niri](https://github.com/niri-wm/niri),
 | Gesture              | Action                            |
 | -------------------- | --------------------------------- |
 | Double Shift         | Convert last word                 |
-| Mod tap              | Convert last word                 |
+| Mod tap              | Convert last word (switch layout when empty) |
 | Shift + Double Shift | Convert phrase                    |
 | Ctrl + Double Shift  | Convert selection (via clipboard) |
 | Ctrl + Mod tap       | Convert selection (via clipboard) |

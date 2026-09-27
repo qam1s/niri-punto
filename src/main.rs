@@ -44,7 +44,7 @@ use selection::{SelectionConverter, SelectionPlan};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use trigger::{Chord, Gesture, GestureKind, PendingGesture, TriggerMachine};
+use trigger::{Chord, Gesture, GestureKind, Key, PendingGesture, TriggerMachine};
 
 /// How often the main loop wakes to serve control-socket bind requests.
 const CONTROL_POLL: Duration = Duration::from_millis(100);
@@ -597,7 +597,11 @@ fn handle_key_at(
     let pressed = raw.value != 0;
     if let Some(gesture) = triggers.key(key, pressed, now_ms) {
         // Latest gesture wins: it supersedes anything still waiting.
-        *pending = Some(PendingGesture::new(gesture, now_ms));
+        // A gesture completed on a lone Mod release is a tap: only meta()
+        // returns Some on those events, so the key tells the source.
+        let mut staged = PendingGesture::new(gesture, now_ms);
+        staged.tap = !pressed && matches!(key, Key::MetaLeft | Key::MetaRight);
+        *pending = Some(staged);
     }
     let Some(staged) = pending.take() else {
         return;
@@ -621,6 +625,22 @@ fn handle_key_at(
             if staged.undo && converter.has_pending_undo() {
                 if let Some(detail) = do_undo(converter, &mut **ipc, &mut **injector) {
                     eprintln!("undo: {detail}");
+                }
+                return;
+            }
+            if staged.tap && buffer.phrase().is_empty() {
+                // Lone Mod tap with no text: toggle the layout within the
+                // pair instead of converting. Repeat toggles back, so no
+                // undo bookkeeping is needed.
+                match ipc.current_layout() {
+                    Ok((current, _)) => {
+                        let target = if current == 0 { 1 } else { 0 };
+                        match ipc.switch_to(target) {
+                            Ok(()) => eprintln!("tap: no text, switched to layout {target}"),
+                            Err(error) => eprintln!("tap: layout switch failed: {error}"),
+                        }
+                    }
+                    Err(error) => eprintln!("tap: layout read failed: {error}"),
                 }
                 return;
             }
@@ -993,6 +1013,29 @@ mod tests {
         h.at(T + 1000, SUPER, 0);
         assert_eq!(h.ipc.switches, vec![1, 0]);
         assert_eq!(h.injector.erases, vec![6, 6]);
+    }
+
+    #[test]
+    fn empty_tap_toggles_layout() {
+        let mut h = Harness::new();
+        h.at(T, SUPER, 1);
+        h.at(T + 100, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert!(h.injector.erases.is_empty());
+        // Repeat toggles back.
+        h.at(T + 500, SUPER, 1);
+        h.at(T + 600, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1, 0]);
+    }
+
+    #[test]
+    fn tap_with_only_a_trailing_space_does_not_toggle() {
+        let mut h = Harness::new();
+        h.tap(T, KeyCode::KEY_SPACE.code());
+        h.at(T + 500, SUPER, 1);
+        h.at(T + 600, SUPER, 0);
+        assert!(h.ipc.switches.is_empty());
+        assert!(h.injector.erases.is_empty());
     }
 
     #[test]
