@@ -15,7 +15,8 @@
 //!
 //! Not wired into any conversion path yet: nothing calls [`verdict`] outside
 //! tests, and the [`Detector`](crate::detector::Detector) seam keeps serving
-//! `ManualOnly`. The trait shape for direction verdicts is still open.
+//! `ManualOnly`. The direction wiring calls [`verdict`] (intended layout +
+//! confidence); the rejected `score() -> Option<f32>` shape stays out.
 
 mod tables;
 
@@ -114,10 +115,123 @@ fn score(text: &str, symbols: &str, table: &[f32], n: usize) -> Option<f32> {
     Some(sum / (seq.len() - 1) as f32)
 }
 
+/// Synthesize buffer entries for selection text the daemon never typed.
+///
+/// Each letter maps back to the scancode whose layout side carries it
+/// (Latin to the US side, Cyrillic to the RU side), so [`verdict`] scores
+/// the selection exactly as if its keystrokes had been remembered. Only
+/// letters and space affect scoring (the bigram symbols are letters plus
+/// the boundary); anything else is skipped.
+pub fn entries_from_text(text: &str) -> Vec<BufferEntry> {
+    let mut out = Vec::new();
+    for ch in text.chars() {
+        if ch == ' ' {
+            out.push(BufferEntry {
+                scancode: 57,
+                shift: false,
+            });
+        } else if ch.is_ascii_alphabetic() {
+            if let Some(scancode) = scancode_for_us(ch.to_ascii_lowercase()) {
+                out.push(BufferEntry {
+                    scancode,
+                    shift: ch.is_ascii_uppercase(),
+                });
+            }
+        } else if !ch.is_ascii() {
+            let lower = ch.to_lowercase().next().unwrap_or(ch);
+            if let Some(scancode) = scancode_for_ru(lower) {
+                out.push(BufferEntry {
+                    scancode,
+                    shift: false,
+                });
+            }
+        }
+    }
+    out
+}
+
+/// Inverse of [`render`] over the US side.
+fn scancode_for_us(en: char) -> Option<u16> {
+    let scancode = match en {
+        'q' => 16,
+        'w' => 17,
+        'e' => 18,
+        'r' => 19,
+        't' => 20,
+        'y' => 21,
+        'u' => 22,
+        'i' => 23,
+        'o' => 24,
+        'p' => 25,
+        'a' => 30,
+        's' => 31,
+        'd' => 32,
+        'f' => 33,
+        'g' => 34,
+        'h' => 35,
+        'j' => 36,
+        'k' => 37,
+        'l' => 38,
+        'z' => 44,
+        'x' => 45,
+        'c' => 46,
+        'v' => 47,
+        'b' => 48,
+        'n' => 49,
+        'm' => 50,
+        _ => return None,
+    };
+    Some(scancode)
+}
+
+/// Inverse of [`render`] over the RU side.
+fn scancode_for_ru(ru: char) -> Option<u16> {
+    let scancode = match ru {
+        'й' => 16,
+        'ц' => 17,
+        'у' => 18,
+        'к' => 19,
+        'е' | 'ё' => 20,
+        'н' => 21,
+        'г' => 22,
+        'ш' => 23,
+        'щ' => 24,
+        'з' => 25,
+        'ф' => 30,
+        'ы' => 31,
+        'в' => 32,
+        'а' => 33,
+        'п' => 34,
+        'р' => 35,
+        'о' => 36,
+        'л' => 37,
+        'д' => 38,
+        'я' => 44,
+        'ч' => 45,
+        'с' => 46,
+        'м' => 47,
+        'и' => 48,
+        'т' => 49,
+        'ь' => 50,
+        _ => return None,
+    };
+    Some(scancode)
+}
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Intended {
     Us,
     Ru,
+}
+
+impl Intended {
+    /// Pair position of the intended layout: the first pair entry is the
+    /// Latin side, the second the Cyrillic side (see the `layouts` config).
+    pub fn index(self) -> u8 {
+        match self {
+            Self::Us => 0,
+            Self::Ru => 1,
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -138,11 +252,20 @@ pub fn verdict(entries: &[BufferEntry]) -> Verdict {
             ru_text.push(ru);
         }
     }
-    if scorable_letters(&us_text) < MIN_LETTERS {
+    verdict_rendered(&us_text, &ru_text)
+}
+
+/// Verdict two same-keystroke renderings: the US-layout text and the
+/// RU-layout text for identical scancodes. [`verdict`] renders buffer
+/// entries; the selection path renders clipboard text via
+/// [`entries_from_text`] and calls [`verdict`] instead, so both paths share
+/// one scoring core.
+fn verdict_rendered(us_text: &str, ru_text: &str) -> Verdict {
+    if scorable_letters(us_text) < MIN_LETTERS {
         return Verdict::Decline;
     }
-    let us = score(&us_text, tables::EN_SYMBOLS, &tables::EN, tables::EN_N);
-    let ru = score(&ru_text, tables::RU_SYMBOLS, &tables::RU, tables::RU_N);
+    let us = score(us_text, tables::EN_SYMBOLS, &tables::EN, tables::EN_N);
+    let ru = score(ru_text, tables::RU_SYMBOLS, &tables::RU, tables::RU_N);
     match (us, ru) {
         (Some(u), Some(r)) => {
             if u - r >= CONFIDENCE_MARGIN {
@@ -533,6 +656,33 @@ mod tests {
             entries.extend(keys_ru(ru));
             assert_eq!(verdict(&entries), Verdict::Decline, "mixed {us:?} + {ru:?}");
         }
+    }
+
+    #[test]
+    fn selection_synthesis_matches_remembered_keystrokes() {
+        // Latin selections verdict like the scancodes that would type them.
+        for case in ["ghbdtn", "hello", "privet", "hi", ""] {
+            assert_eq!(
+                verdict(&entries_from_text(case)),
+                verdict(&keys(case)),
+                "{case}"
+            );
+        }
+        // Cyrillic selections verdict like scancodes typed under RU.
+        for case in ["привет", "мир", "окно"] {
+            assert_eq!(
+                verdict(&entries_from_text(case)),
+                verdict(&keys_ru(case)),
+                "{case}"
+            );
+        }
+        // Unscorable characters never contribute: digits, emoji, and
+        // punctuation synthesize to nothing (or to inert spaces).
+        assert!(entries_from_text("123👋").is_empty());
+        assert_eq!(
+            verdict(&entries_from_text("ghbdtn 👋")),
+            verdict(&keys("ghbdtn"))
+        );
     }
 
     #[test]
