@@ -1,0 +1,14 @@
+# niri-punto: grant the active session user read access to input devices.
+# Installed by `niri-punto setup` (escalated step) or by hand:
+#   sudo install -m 644 contrib/70-niri-punto.rules /etc/udev/rules.d/
+#   sudo rm -f /etc/udev/rules.d/99-niri-punto.rules  # stale 0.1.0 name
+#   sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --subsystem-match=input --subsystem-match=misc
+# uaccess drops with the session: no `input` group, no relogin.
+# The `70-` prefix is load-bearing: stock `71-seat` derives the seat tag
+# FROM `uaccess`, and `73-seat-late` queues the ACL builtin from it. A
+# `99-*` name tags the device after both ran, so no seat and no ACL is
+# ever written (the tag shows, the access doesn't).
+# The uinput line needs the module loaded (see contrib/niri-punto.conf):
+# without /sys/class/misc/uinput the node is static and matches nothing.
+KERNEL=="event*", SUBSYSTEM=="input", TAG+="uaccess"
+KERNEL=="uinput", TAG+="uaccess"

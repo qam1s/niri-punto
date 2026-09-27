@@ -13,7 +13,13 @@ use std::path::{Path, PathBuf};
 /// Where keyboard nodes live.
 pub const INPUT_DIR: &str = "/dev/input";
 /// Where `setup` installs the uaccess rule.
-pub const RULE_DEST: &str = "/etc/udev/rules.d/99-niri-punto.rules";
+pub const RULE_DEST: &str = "/etc/udev/rules.d/70-niri-punto.rules";
+/// Where `setup` installs the uinput modules-load entry.
+pub const MODULES_DEST: &str = "/etc/modules-load.d/niri-punto.conf";
+/// The injection device the daemon opens.
+pub const UINPUT_NODE: &str = "/dev/uinput";
+/// sysfs presence of the uinput driver (missing = dead static node).
+pub const UINPUT_SYSFS: &str = "/sys/class/misc/uinput";
 
 /// A layout correspondence finding between the configured pair and niri.
 ///
@@ -122,6 +128,55 @@ pub fn assess_rule(content: Option<&str>) -> RuleCheck {
 /// Read the installed rule, if any.
 pub fn read_rule() -> Option<String> {
     std::fs::read_to_string(RULE_DEST).ok()
+}
+
+/// How /dev/uinput fares. Pure over the node/sysfs paths, so tests use
+/// scratch dirs: opening is read-only and side-effect free.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum UinputCheck {
+    /// Opens read-only: driver loaded and access granted.
+    Ok,
+    /// Node missing entirely.
+    Missing,
+    /// Present but not openable. `driver_loaded` tells a missing driver
+    /// (dead static node: `sudo modprobe uinput`) apart from missing
+    /// access (rule/ACL: rerun `setup`).
+    NotUsable { driver_loaded: bool },
+}
+
+impl fmt::Display for UinputCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok => write!(f, "ok (driver loaded, readable)"),
+            Self::Missing => write!(f, "MISSING: no /dev/uinput on this system"),
+            Self::NotUsable {
+                driver_loaded: false,
+            } => write!(
+                f,
+                "driver not loaded (dead static node): run `sudo modprobe uinput`, \
+                 or rerun `niri-punto setup` for the persistent modules-load entry"
+            ),
+            Self::NotUsable {
+                driver_loaded: true,
+            } => write!(
+                f,
+                "present but not readable: missing uaccess ACL? rerun `niri-punto setup`"
+            ),
+        }
+    }
+}
+
+/// Probe the injection device without side effects.
+pub fn check_uinput(node: &Path, sysfs: &Path) -> UinputCheck {
+    if !node.exists() {
+        return UinputCheck::Missing;
+    }
+    if std::fs::File::open(node).is_ok() {
+        return UinputCheck::Ok;
+    }
+    UinputCheck::NotUsable {
+        driver_loaded: sysfs.exists(),
+    }
 }
 
 /// One input node probe: path plus whether it opens as a keyboard.
@@ -234,6 +289,12 @@ pub fn run() -> i32 {
         failed = true;
     }
     line("permissions", format!("{RULE_DEST}: {rule}"));
+
+    let uinput = check_uinput(Path::new(UINPUT_NODE), Path::new(UINPUT_SYSFS));
+    if uinput != UinputCheck::Ok {
+        failed = true;
+    }
+    line("uinput", format!("{UINPUT_NODE}: {uinput}"));
 
     let layouts = match std::env::var("NIRI_SOCKET") {
         Ok(socket) => {
@@ -400,5 +461,59 @@ mod tests {
         assert!(report.contains('3'), "{report}");
         assert!(report.contains("\"us\""), "{report}");
         assert!(report.contains("\"ru\""), "{report}");
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("niri-punto-doctor-{name}"));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn uinput_missing_node_is_missing() {
+        let dir = scratch("uinput-missing");
+        assert_eq!(
+            check_uinput(&dir.join("uinput"), &dir.join("sysfs")),
+            UinputCheck::Missing
+        );
+    }
+
+    #[test]
+    fn uinput_openable_node_is_ok() {
+        let dir = scratch("uinput-ok");
+        let node = dir.join("uinput");
+        std::fs::write(&node, b"fake").unwrap();
+        assert_eq!(check_uinput(&node, &dir.join("sysfs")), UinputCheck::Ok);
+    }
+
+    #[test]
+    fn uinput_unreadable_node_names_driver_state() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("uinput-perms");
+        let node = dir.join("uinput");
+        std::fs::write(&node, b"fake").unwrap();
+        let mut permissions = std::fs::metadata(&node).unwrap().permissions();
+        permissions.set_mode(0o000);
+        std::fs::set_permissions(&node, permissions).unwrap();
+        let sysfs = dir.join("sysfs");
+        assert_eq!(
+            check_uinput(&node, &sysfs),
+            UinputCheck::NotUsable {
+                driver_loaded: false
+            }
+        );
+        std::fs::create_dir_all(&sysfs).unwrap();
+        assert_eq!(
+            check_uinput(&node, &sysfs),
+            UinputCheck::NotUsable {
+                driver_loaded: true
+            }
+        );
+        let report = UinputCheck::NotUsable {
+            driver_loaded: false,
+        }
+        .to_string();
+        assert!(report.contains("modprobe"), "{report}");
     }
 }

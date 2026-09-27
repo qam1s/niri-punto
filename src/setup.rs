@@ -10,16 +10,22 @@
 //! commands go through [`Runner`] so `--dry-run` and tests observe without
 //! executing.
 
-use crate::config::{self, DEFAULT_CONFIG, RULE_FILE_NAME};
+use crate::config::{self, DEFAULT_CONFIG, MODULES_FILE_NAME, RULE_FILE_NAME};
 use crate::doctor;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-/// Shipped unit and rule, embedded so `setup` works from the bare binary.
-/// The same files live under `contrib/` in the tarball for manual install.
+/// Shipped unit, rule and modules-load entry, embedded so `setup` works
+/// from the bare binary. The same files live under `contrib/` in the
+/// tarball for manual install.
 pub const UNIT_SOURCE: &str = include_str!("../contrib/niri-punto.service");
-pub const RULE_SOURCE: &str = include_str!("../contrib/99-niri-punto.rules");
+pub const RULE_SOURCE: &str = include_str!("../contrib/70-niri-punto.rules");
+pub const MODULES_SOURCE: &str = include_str!("../contrib/niri-punto.conf");
+
+/// Rule name shipped by 0.1.0, removed on upgrade: it sorted after stock
+/// `71-seat`/`73-seat-late`, so tagged devices never got a seat or an ACL.
+pub const STALE_RULE_DEST: &str = "/etc/udev/rules.d/99-niri-punto.rules";
 
 pub const SERVICE_FILE_NAME: &str = "niri-punto.service";
 
@@ -163,27 +169,44 @@ pub fn write_default_config(dest: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Rule shipped next to the binary in the tarball layout, if present.
-pub fn shipped_rule_src(exe: &Path) -> Option<PathBuf> {
-    let candidate = exe.parent()?.join("contrib").join(RULE_FILE_NAME);
+/// Contrib file shipped next to the binary in the tarball layout, if present.
+fn shipped_contrib(exe: &Path, name: &str) -> Option<PathBuf> {
+    let candidate = exe.parent()?.join("contrib").join(name);
     candidate.is_file().then_some(candidate)
 }
 
-/// Stage the embedded rule text so `sudo install` (or the manual command)
-/// has a source path even outside the tarball layout.
-pub fn stage_rule(dir: &Path) -> io::Result<PathBuf> {
+/// Stage embedded text so `sudo install` (or the manual command) has a
+/// source path even outside the tarball layout.
+fn stage_embedded(dir: &Path, name: &str, content: &str) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
-    let path = dir.join(RULE_FILE_NAME);
-    std::fs::write(&path, RULE_SOURCE)?;
+    let path = dir.join(name);
+    std::fs::write(&path, content)?;
     Ok(path)
+}
+
+/// Resolve a shipped-or-staged source: tarball file wins, embedded staging
+/// is fallback.
+fn file_source(exe: &Path, staging_dir: &Path, name: &str, embedded: &str) -> io::Result<PathBuf> {
+    if let Some(shipped) = shipped_contrib(exe, name) {
+        return Ok(shipped);
+    }
+    stage_embedded(staging_dir, name, embedded)
+}
+
+/// Rule shipped next to the binary in the tarball layout, if present.
+pub fn shipped_rule_src(exe: &Path) -> Option<PathBuf> {
+    shipped_contrib(exe, RULE_FILE_NAME)
 }
 
 /// Resolve the rule source: shipped file wins, embedded staging is fallback.
 pub fn rule_source(exe: &Path, staging_dir: &Path) -> io::Result<PathBuf> {
-    if let Some(shipped) = shipped_rule_src(exe) {
-        return Ok(shipped);
-    }
-    stage_rule(staging_dir)
+    file_source(exe, staging_dir, RULE_FILE_NAME, RULE_SOURCE)
+}
+
+/// Resolve the modules-load source: shipped file wins, embedded staging is
+/// fallback.
+pub fn modules_source(exe: &Path, staging_dir: &Path) -> io::Result<PathBuf> {
+    file_source(exe, staging_dir, MODULES_FILE_NAME, MODULES_SOURCE)
 }
 
 /// User-level daemon reload + enable. No privilege involved.
@@ -197,14 +220,22 @@ pub fn user_commands() -> Vec<Command> {
     ]
 }
 
-/// The escalated udev step: install the rule, reload, trigger.
-/// The trigger replays `add` (scoped to the input subsystem): logind writes
-/// uaccess ACLs on add events, so already-present devices become readable
-/// without a reboot or replug. A bare `trigger` (change) only retags them.
-pub fn udev_commands(rule_src: &Path) -> Vec<Command> {
-    let src = rule_src.to_string_lossy().to_string();
+/// The escalated udev step: drop the stale 0.1.0 rule name, install the
+/// rule and the modules-load entry, load the driver now, reload, trigger.
+/// The trigger replays `add` scoped to input+misc: already-present devices
+/// become readable without a reboot or replug, and a freshly modprobed
+/// uinput gets tagged in the same pass.
+pub fn udev_commands(rule_src: &Path, modules_src: &Path) -> Vec<Command> {
+    let rule = rule_src.to_string_lossy().to_string();
+    let modules = modules_src.to_string_lossy().to_string();
     vec![
-        Command::new("sudo", &["install", "-m", "644", &src, doctor::RULE_DEST]),
+        Command::new("sudo", &["rm", "-f", STALE_RULE_DEST]),
+        Command::new("sudo", &["install", "-m", "644", &rule, doctor::RULE_DEST]),
+        Command::new(
+            "sudo",
+            &["install", "-m", "644", &modules, doctor::MODULES_DEST],
+        ),
+        Command::new("sudo", &["modprobe", "uinput"]),
         Command::new("sudo", &["udevadm", "control", "--reload-rules"]),
         Command::new(
             "sudo",
@@ -213,14 +244,15 @@ pub fn udev_commands(rule_src: &Path) -> Vec<Command> {
                 "trigger",
                 "--action=add",
                 "--subsystem-match=input",
+                "--subsystem-match=misc",
             ],
         ),
     ]
 }
 
 /// Manual fallback printed with `--no-udev`.
-pub fn manual_udev_command(rule_src: &Path) -> String {
-    udev_commands(rule_src)
+pub fn manual_udev_command(rule_src: &Path, modules_src: &Path) -> String {
+    udev_commands(rule_src, modules_src)
         .iter()
         .map(|command| command.to_string())
         .collect::<Vec<_>>()
@@ -277,7 +309,7 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
         }
     }
 
-    // Dry run resolves the rule path without staging files.
+    // Dry run resolves the source paths without staging files.
     let rule_src = if options.dry_run {
         shipped_rule_src(&paths.exe).unwrap_or_else(|| staging_dir().join(RULE_FILE_NAME))
     } else {
@@ -289,16 +321,31 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
             }
         }
     };
+    let modules_src = if options.dry_run {
+        shipped_contrib(&paths.exe, MODULES_FILE_NAME)
+            .unwrap_or_else(|| staging_dir().join(MODULES_FILE_NAME))
+    } else {
+        match modules_source(&paths.exe, &staging_dir()) {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("modules entry: {error}");
+                return 1;
+            }
+        }
+    };
     if options.no_udev {
         println!("udev rule: skipped (--no-udev); install by hand:");
-        println!("  {}", manual_udev_command(&rule_src));
+        println!("  {}", manual_udev_command(&rule_src, &modules_src));
     } else {
         println!("udev rule: needs root; escalating just this step");
-        for command in udev_commands(&rule_src) {
+        for command in udev_commands(&rule_src, &modules_src) {
             println!("+ {command}");
             if let Err(error) = exec(runner, options.dry_run, &command) {
                 eprintln!("udev rule: {error}");
-                eprintln!("  fallback: {}", manual_udev_command(&rule_src));
+                eprintln!(
+                    "  fallback: {}",
+                    manual_udev_command(&rule_src, &modules_src)
+                );
                 return 1;
             }
         }
@@ -548,17 +595,43 @@ mod tests {
     #[test]
     fn only_the_udev_step_needs_sudo() {
         assert!(user_commands().iter().all(|command| command.prog != "sudo"));
-        let udev = udev_commands(Path::new("/tmp/99-niri-punto.rules"));
+        let udev = udev_commands(
+            Path::new("/tmp/70-niri-punto.rules"),
+            Path::new("/tmp/niri-punto.conf"),
+        );
         assert!(!udev.is_empty());
         assert!(udev.iter().all(|command| command.prog == "sudo"));
-        let manual = manual_udev_command(Path::new("/tmp/99-niri-punto.rules"));
+        let manual = manual_udev_command(
+            Path::new("/tmp/70-niri-punto.rules"),
+            Path::new("/tmp/niri-punto.conf"),
+        );
         assert!(manual.contains("sudo install -m 644"));
         assert!(manual.contains(doctor::RULE_DEST));
+        assert!(manual.contains(doctor::MODULES_DEST));
+        assert!(manual.contains("sudo modprobe uinput"));
+        assert!(manual.contains(STALE_RULE_DEST));
         assert!(manual.contains("udevadm control --reload-rules"));
         // Add (not change) events are what make logind write uaccess ACLs
         // onto already-present devices (no reboot/replug needed).
         assert!(manual.contains("--action=add"));
         assert!(manual.contains("--subsystem-match=input"));
+        assert!(manual.contains("--subsystem-match=misc"));
+    }
+
+    #[test]
+    fn modules_source_prefers_shipped_and_stages_embedded() {
+        let dir = scratch("setup-modules");
+        let exe = fake_exe(&dir);
+        std::fs::create_dir_all(dir.join("contrib")).unwrap();
+        let shipped = dir.join("contrib").join(MODULES_FILE_NAME);
+        std::fs::write(&shipped, "uinput\n").unwrap();
+        assert_eq!(modules_source(&exe, &dir.join("stage")).unwrap(), shipped);
+
+        let dir2 = scratch("setup-modules-fallback");
+        let exe2 = fake_exe(&dir2);
+        let staged = modules_source(&exe2, &dir2.join("stage")).unwrap();
+        assert_eq!(std::fs::read_to_string(&staged).unwrap(), MODULES_SOURCE);
+        assert!(MODULES_SOURCE.lines().any(|line| line.trim() == "uinput"));
     }
 
     #[test]
@@ -577,10 +650,10 @@ mod tests {
             DEFAULT_CONFIG
         );
         let commands = runner.commands.borrow();
-        assert_eq!(commands.len(), 5); // 3 udev (sudo) + 2 user systemctl
-        assert!(commands[..3].iter().all(|command| command.prog == "sudo"));
+        assert_eq!(commands.len(), 8); // 6 udev (sudo) + 2 user systemctl
+        assert!(commands[..6].iter().all(|command| command.prog == "sudo"));
         assert!(
-            commands[3..]
+            commands[6..]
                 .iter()
                 .all(|command| command.prog == "systemctl")
         );

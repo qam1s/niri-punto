@@ -21,9 +21,9 @@ Requirements: [niri](https://github.com/niri-wm/niri),
    [Releases page](https://github.com/qam1s/niri-punto/releases) and verify
    the `.sha256` checksum.
 2. Extract and run `./niri-punto setup`. Everything installs at user level
-   (binary, systemd unit, default config); only the udev rule for device
-   access needs root — `setup` escalates just that step (or pass `--no-udev`
-   and install the rule by hand).
+   (binary, systemd unit, default config); only the udev rule, the
+   modules-load entry and the driver load need root — `setup` escalates
+   just those steps (or pass `--no-udev` and install them by hand).
 
 ## Usage
 

@@ -22,8 +22,14 @@ pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pai
 layouts "us" "ru"
 "#;
 
-/// File name of the udev rule, shared with `setup` and `doctor`.
-pub const RULE_FILE_NAME: &str = "99-niri-punto.rules";
+/// File name of the udev rule, shared with `setup` and `doctor`. The `70-`
+/// prefix is load-bearing: it must sort before stock `71-seat` (derives
+/// the seat tag from `uaccess`) and `73-seat-late` (queues the ACL
+/// builtin); a `99-*` name tags devices too late and no ACL is written.
+pub const RULE_FILE_NAME: &str = "70-niri-punto.rules";
+
+/// File name of the modules-load entry that pulls in `uinput` at boot.
+pub const MODULES_FILE_NAME: &str = "niri-punto.conf";
 
 /// Ordered layout pair from the `layouts` node.
 #[derive(Clone, PartialEq, Eq, Debug)]
