@@ -387,6 +387,7 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     let mut triggers = TriggerMachine::new();
     triggers.set_tap(settings.tap);
     triggers.set_chords(settings.chords);
+    triggers.set_timing(settings.timing);
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new(pair.clone());
     let mut selection_converter = SelectionConverter::new(pair);
@@ -471,7 +472,7 @@ fn handle_control(
             ControlKind::Word => GestureKind::Word,
             ControlKind::Selection => GestureKind::Selection,
         };
-        *pending = Some(PendingGesture::new(Gesture { kind, undo: false }, now_ms));
+        *pending = Some(triggers.stage(Gesture { kind, undo: false }, now_ms));
         eprintln!(
             "control: {} deferred until modifiers release",
             request.kind.as_line().trim()
@@ -566,7 +567,7 @@ fn handle_key_at(
         .flatten();
     if let Some(gesture) = chord {
         // Latest gesture wins: it supersedes anything still waiting.
-        *pending = Some(PendingGesture::new(gesture, now_ms));
+        *pending = Some(triggers.stage(gesture, now_ms));
     } else if reader::is_typing_key(key, raw.value) {
         // New physical input cancels a pending undo: "repeat" only undoes
         // an immediately preceding conversion. It also cancels a gesture
@@ -599,7 +600,7 @@ fn handle_key_at(
         // Latest gesture wins: it supersedes anything still waiting.
         // A gesture completed on a lone Mod release is a tap: only meta()
         // returns Some on those events, so the key tells the source.
-        let mut staged = PendingGesture::new(gesture, now_ms);
+        let mut staged = triggers.stage(gesture, now_ms);
         staged.tap = !pressed && matches!(key, Key::MetaLeft | Key::MetaRight);
         *pending = Some(staged);
     }

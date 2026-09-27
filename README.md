@@ -86,6 +86,18 @@ Each `chord` line is Meta held + key press, with the action `word`,
 The chord key is the trigger, not text, so the converted scope stays
 exact. A bad file stops the daemon at start, like a bad `layouts` node.
 
+Trigger timings in milliseconds (absent keys mean the defaults):
+
+```kdl
+timings {
+    double-shift-ms 400
+    undo-ms 3000
+    debounce-ms 30
+    pending-ms 2000
+    tap-ms 300
+}
+```
+
 ## License
 
 GPL-3.0-or-later [LICENSE](LICENSE).

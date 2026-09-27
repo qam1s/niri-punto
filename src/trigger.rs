@@ -14,6 +14,29 @@ pub const DEBOUNCE_MS: u64 = 30;
 /// holds are chord prefixes (or hesitation), never a tap.
 pub const TAP_WINDOW_MS: u64 = 300;
 
+/// All trigger timing knobs in one place. From the config `timings`
+/// block; absent means [`TimingConfig::default`], which is these consts.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TimingConfig {
+    pub double_shift_ms: u64,
+    pub undo_ms: u64,
+    pub debounce_ms: u64,
+    pub pending_ms: u64,
+    pub tap_ms: u64,
+}
+
+impl Default for TimingConfig {
+    fn default() -> Self {
+        Self {
+            double_shift_ms: DOUBLE_SHIFT_WINDOW_MS,
+            undo_ms: UNDO_WINDOW_MS,
+            debounce_ms: DEBOUNCE_MS,
+            pending_ms: PENDING_TIMEOUT_MS,
+            tap_ms: TAP_WINDOW_MS,
+        }
+    }
+}
+
 /// Keys the machine cares about. Everything else is [`Key::Other`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
@@ -85,12 +108,12 @@ pub struct PendingGesture {
 }
 
 impl PendingGesture {
-    pub fn new(gesture: Gesture, now_ms: u64) -> Self {
+    pub fn new(gesture: Gesture, now_ms: u64, timeout_ms: u64) -> Self {
         Self {
             kind: gesture.kind,
             undo: gesture.undo,
             tap: false,
-            deadline_ms: now_ms.saturating_add(PENDING_TIMEOUT_MS),
+            deadline_ms: now_ms.saturating_add(timeout_ms),
         }
     }
 
@@ -143,6 +166,7 @@ pub struct TriggerMachine {
     tap_disturbed: bool,
     tap: TapMode,
     chords: Vec<Chord>,
+    timing: TimingConfig,
     last_gesture: Option<(GestureKind, u64)>,
 }
 
@@ -160,6 +184,7 @@ impl TriggerMachine {
             tap_disturbed: false,
             tap: TapMode::Meta,
             chords: Vec::new(),
+            timing: TimingConfig::default(),
             last_gesture: None,
         }
     }
@@ -191,6 +216,17 @@ impl TriggerMachine {
         self.chords = chords;
     }
 
+    /// Timing knobs from the config (`timings` block).
+    pub fn set_timing(&mut self, timing: TimingConfig) {
+        self.timing = timing;
+    }
+
+    /// Stage a recognized gesture into the wait-for-release slot with the
+    /// configured pending timeout.
+    pub fn stage(&self, gesture: Gesture, now_ms: u64) -> PendingGesture {
+        PendingGesture::new(gesture, now_ms, self.timing.pending_ms)
+    }
+
     /// A configured chord key pressed with Meta held. The caller checks
     /// [`TriggerMachine::meta_held`] and press (not autorepeat) first;
     /// undo accounting rides the shared gesture chain, like taps.
@@ -200,7 +236,7 @@ impl TriggerMachine {
             .iter()
             .find(|chord| chord.scancode == scancode)?
             .kind;
-        let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= UNDO_WINDOW_MS);
+        let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= self.timing.undo_ms);
         self.last_gesture = Some((kind, now_ms));
         Some(Gesture { kind, undo })
     }
@@ -244,7 +280,7 @@ impl TriggerMachine {
                 return None; // autorepeat, not a new press
             }
             if let Some(released) = self.last_release_ms[i]
-                && now_ms.saturating_sub(released) < DEBOUNCE_MS
+                && now_ms.saturating_sub(released) < self.timing.debounce_ms
             {
                 return None; // switch bounce
             }
@@ -252,7 +288,7 @@ impl TriggerMachine {
             match self.first_press_ms {
                 Some(first)
                     if !self.disturbed
-                        && now_ms.saturating_sub(first) <= DOUBLE_SHIFT_WINDOW_MS =>
+                        && now_ms.saturating_sub(first) <= self.timing.double_shift_ms =>
                 {
                     self.first_press_ms = None;
                     self.disturbed = false;
@@ -263,7 +299,7 @@ impl TriggerMachine {
                     } else {
                         GestureKind::Word
                     };
-                    let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= UNDO_WINDOW_MS);
+                    let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= self.timing.undo_ms);
                     self.last_gesture = Some((kind, now_ms));
                     Some(Gesture { kind, undo })
                 }
@@ -294,7 +330,7 @@ impl TriggerMachine {
                 return None; // autorepeat, not a new press
             }
             if let Some(released) = self.meta_release_ms[i]
-                && now_ms.saturating_sub(released) < DEBOUNCE_MS
+                && now_ms.saturating_sub(released) < self.timing.debounce_ms
             {
                 return None; // switch bounce
             }
@@ -313,14 +349,14 @@ impl TriggerMachine {
                     Some(pressed_at)
                         if !self.tap_disturbed
                             && !self.shift_held()
-                            && now_ms.saturating_sub(pressed_at) <= TAP_WINDOW_MS =>
+                            && now_ms.saturating_sub(pressed_at) <= self.timing.tap_ms =>
                     {
                         let kind = if self.ctrl_held() {
                             GestureKind::Selection
                         } else {
                             GestureKind::Word
                         };
-                        let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= UNDO_WINDOW_MS);
+                        let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= self.timing.undo_ms);
                         self.last_gesture = Some((kind, now_ms));
                         Some(Gesture { kind, undo })
                     }
@@ -767,12 +803,43 @@ mod tests {
     }
 
     #[test]
+    fn custom_double_shift_window_applies() {
+        let mut m = TriggerMachine::new();
+        m.set_timing(TimingConfig {
+            double_shift_ms: 1000,
+            ..Default::default()
+        });
+        assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
+        assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
+        // Past the default 400 ms, inside the configured 1000 ms.
+        let g = press(&mut m, Key::ShiftLeft, T + 600);
+        assert!(matches!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Word,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn custom_tap_window_applies() {
+        let mut m = TriggerMachine::new();
+        m.set_timing(TimingConfig {
+            tap_ms: 50,
+            ..Default::default()
+        });
+        assert_eq!(press(&mut m, Key::MetaLeft, T), None);
+        assert_eq!(release(&mut m, Key::MetaLeft, T + 100), None);
+    }
+
+    #[test]
     fn pending_fires_only_when_free_before_the_deadline() {
         let gesture = Gesture {
             kind: GestureKind::Word,
             undo: false,
         };
-        let pending = PendingGesture::new(gesture, T);
+        let pending = PendingGesture::new(gesture, T, PENDING_TIMEOUT_MS);
         assert!(!pending.ready(T, false));
         assert!(pending.ready(T, true));
         assert!(pending.ready(T + PENDING_TIMEOUT_MS, true));
@@ -785,7 +852,7 @@ mod tests {
             kind: GestureKind::Selection,
             undo: true,
         };
-        let pending = PendingGesture::new(gesture, T);
+        let pending = PendingGesture::new(gesture, T, PENDING_TIMEOUT_MS);
         assert!(!pending.expired(T));
         assert!(!pending.expired(T + PENDING_TIMEOUT_MS));
         assert!(pending.expired(T + PENDING_TIMEOUT_MS + 1));

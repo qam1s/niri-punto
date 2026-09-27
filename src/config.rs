@@ -12,7 +12,7 @@
 //! environment.
 
 use crate::reader;
-use crate::trigger::{Chord, GestureKind, TapMode};
+use crate::trigger::{Chord, GestureKind, TapMode, TimingConfig};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,6 +27,14 @@ tap "meta"
 // Daemon-side chords (Meta held + key): no niri binds needed. Examples:
 // chord "meta+l" "word"
 // chord "meta+s" "selection"
+// Trigger timings in milliseconds: absent keys mean these defaults.
+timings {
+    double-shift-ms 400
+    undo-ms 3000
+    debounce-ms 30
+    pending-ms 2000
+    tap-ms 300
+}
 "#;
 
 /// File name of the udev rule, shared with `setup` and `doctor`. The `70-`
@@ -89,6 +97,8 @@ pub enum ConfigError {
     BadTap(String),
     /// A `chord` node is malformed (combo or action).
     BadChord(String),
+    /// The `timings` block is malformed (keys or values).
+    BadTimings(String),
     /// File I/O failed (missing file, permissions).
     Io(String),
 }
@@ -109,6 +119,7 @@ impl fmt::Display for ConfigError {
             Self::Duplicate(code) => write!(f, "layout codes must differ, both are \"{code}\""),
             Self::BadTap(message) => write!(f, "bad `tap` node: {message}"),
             Self::BadChord(message) => write!(f, "bad `chord` node: {message}"),
+            Self::BadTimings(message) => write!(f, "bad `timings` block: {message}"),
             Self::Io(message) => write!(f, "{message}"),
         }
     }
@@ -167,6 +178,7 @@ pub fn parse(text: &str) -> Result<LayoutPair, ConfigError> {
 pub struct TriggerSettings {
     pub tap: TapMode,
     pub chords: Vec<Chord>,
+    pub timing: TimingConfig,
 }
 
 /// Parse trigger settings. Unknown nodes are ignored, like in [`parse`].
@@ -176,6 +188,7 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
         .map_err(|error: kdl::KdlError| ConfigError::Parse(error.to_string()))?;
     let mut settings = TriggerSettings::default();
     let mut tap_seen = false;
+    let mut timings_seen = false;
     for node in document.nodes() {
         match node.name().value() {
             "tap" => {
@@ -188,6 +201,15 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
                 settings.tap = parse_tap(node)?;
             }
             "chord" => settings.chords.push(parse_chord(node)?),
+            "timings" => {
+                if timings_seen {
+                    return Err(ConfigError::BadTimings(
+                        "more than one `timings` block: keep exactly one".to_string(),
+                    ));
+                }
+                timings_seen = true;
+                settings.timing = parse_timings(node)?;
+            }
             _ => {}
         }
     }
@@ -253,6 +275,76 @@ fn parse_chord(node: &kdl::KdlNode) -> Result<Chord, ConfigError> {
     Ok(Chord { scancode, kind })
 }
 
+/// Exactly one positional integer argument, no properties.
+fn single_int(node: &kdl::KdlNode) -> Option<i128> {
+    let [entry] = node.entries() else {
+        return None;
+    };
+    if entry.name().is_some() {
+        return None;
+    }
+    match entry.value() {
+        kdl::KdlValue::Integer(ms) => Some(*ms),
+        _ => None,
+    }
+}
+
+/// Parse the `timings` block. Absent keys mean defaults; unknown keys,
+/// duplicates, and non-integer values are errors (a typoed number must
+/// not silently apply).
+fn parse_timings(node: &kdl::KdlNode) -> Result<TimingConfig, ConfigError> {
+    if !node.entries().is_empty() {
+        return Err(ConfigError::BadTimings(
+            "the block takes no arguments, only child nodes".to_string(),
+        ));
+    }
+    let Some(children) = node.children() else {
+        return Ok(TimingConfig::default());
+    };
+    let mut timing = TimingConfig::default();
+    let mut seen = [false; 5];
+    for child in children.nodes() {
+        let slot = match child.name().value() {
+            "double-shift-ms" => 0,
+            "undo-ms" => 1,
+            "debounce-ms" => 2,
+            "pending-ms" => 3,
+            "tap-ms" => 4,
+            unknown => {
+                return Err(ConfigError::BadTimings(format!("unknown key {unknown:?}")));
+            }
+        };
+        if seen[slot] {
+            return Err(ConfigError::BadTimings(format!(
+                "duplicate key {:?}",
+                child.name().value()
+            )));
+        }
+        seen[slot] = true;
+        let Some(ms) = single_int(child) else {
+            return Err(ConfigError::BadTimings(format!(
+                "{:?} wants exactly one integer number of milliseconds",
+                child.name().value()
+            )));
+        };
+        if ms < 0 || ms > u64::MAX as i128 {
+            return Err(ConfigError::BadTimings(format!(
+                "{:?} must fit in milliseconds 0..=u64::MAX, got {ms}",
+                child.name().value()
+            )));
+        }
+        let ms = ms as u64;
+        match slot {
+            0 => timing.double_shift_ms = ms,
+            1 => timing.undo_ms = ms,
+            2 => timing.debounce_ms = ms,
+            3 => timing.pending_ms = ms,
+            _ => timing.tap_ms = ms,
+        }
+    }
+    Ok(timing)
+}
+
 /// Config path for explicit homes. Pure: the env-reading wrapper is
 /// [`config_path`].
 pub fn config_path_for(home: &Path, xdg_config_home: Option<&str>) -> PathBuf {
@@ -310,7 +402,8 @@ fn with_path(path: &Path, error: ConfigError) -> ConfigError {
         | ConfigError::EmptyCode
         | ConfigError::Duplicate(_)
         | ConfigError::BadTap(_)
-        | ConfigError::BadChord(_) => ConfigError::Io(format!("{}: {error}", path.display())),
+        | ConfigError::BadChord(_)
+        | ConfigError::BadTimings(_) => ConfigError::Io(format!("{}: {error}", path.display())),
         ConfigError::Io(_) => error,
     }
 }
@@ -481,6 +574,61 @@ mod tests {
         ] {
             let text = format!("layouts \"us\" \"ru\"\n{node}");
             assert!(parse_settings(&text).is_err(), "{node}");
+        }
+    }
+
+    #[test]
+    fn timings_default_without_block() {
+        let settings = parse_settings("layouts \"us\" \"ru\"\n").unwrap();
+        assert_eq!(settings.timing, TimingConfig::default());
+    }
+
+    #[test]
+    fn timings_full_block_parses() {
+        let settings = parse_settings(
+            "layouts \"us\" \"ru\"\ntimings {\n double-shift-ms 1000\n undo-ms 2000\n debounce-ms 10\n pending-ms 500\n tap-ms 200\n}\n",
+        )
+        .unwrap();
+        assert_eq!(
+            settings.timing,
+            TimingConfig {
+                double_shift_ms: 1000,
+                undo_ms: 2000,
+                debounce_ms: 10,
+                pending_ms: 500,
+                tap_ms: 200,
+            }
+        );
+    }
+
+    #[test]
+    fn timings_partial_block_keeps_defaults() {
+        let settings = parse_settings("layouts \"us\" \"ru\"\ntimings { tap-ms 200 }\n").unwrap();
+        assert_eq!(settings.timing.tap_ms, 200);
+        assert_eq!(
+            settings.timing,
+            TimingConfig {
+                tap_ms: 200,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn timings_reject_bad_blocks() {
+        for block in [
+            "timings { double-shift-ms 1.5 }\n",
+            "timings { double-shift-ms -5 }\n",
+            "timings { double-shift-ms \"fast\" }\n",
+            "timings { double-shift-ms }\n",
+            "timings { double-shift-ms 100 200 }\n",
+            "timings { turbo-ms 100 }\n",
+            "timings { tap-ms 100 tap-ms 200 }\n",
+            "timings { tap-ms 100 }\ntimings { tap-ms 200 }\n",
+            "timings 100\n",
+        ] {
+            let text = format!("layouts \"us\" \"ru\"\n{block}");
+            assert!(parse_settings(&text).is_err(), "{block}");
         }
     }
 
