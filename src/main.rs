@@ -44,7 +44,7 @@ use selection::{SelectionConverter, SelectionPlan};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use trigger::{Chord, Gesture, GestureKind, Key, PendingGesture, TriggerMachine};
+use trigger::{Gesture, GestureKind, Key, PendingGesture, TriggerMachine};
 
 /// How often the main loop wakes to serve control-socket bind requests.
 const CONTROL_POLL: Duration = Duration::from_millis(100);
@@ -703,6 +703,7 @@ mod tests {
     use super::*;
     use crate::buffer::BufferEntry;
     use crate::config::LayoutPair;
+    use crate::trigger::Chord;
     use evdev::KeyCode;
     use std::io;
 
