@@ -57,6 +57,7 @@ fn usage() -> ! {
     eprintln!("  setup [--no-udev] [--dry-run]  install binary, unit, config, udev rule");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("Double Shift converts the word, Shift+DoubleShift the phrase;");
+    eprintln!("a lone Mod tap converts the word, Ctrl+Mod tap the selection;");
     eprintln!("niri binds (e.g. Mod+L) use the convert-* subcommands.");
     std::process::exit(2);
 }
@@ -930,6 +931,30 @@ mod tests {
         h.at(T + 600, SUPER, 0); // release Mod: the staged request fires
         assert_eq!(h.ipc.switches, vec![1]);
         assert_eq!(h.injector.erases, vec![6]);
+    }
+
+    #[test]
+    fn mod_tap_converts_word() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.at(T + 500, SUPER, 1);
+        h.at(T + 600, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.injector.erases, vec![6]);
+        assert_eq!(h.injector.replays.len(), 1);
+        assert!(h.converter.has_pending_undo());
+    }
+
+    #[test]
+    fn repeated_mod_tap_undoes() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.at(T + 500, SUPER, 1);
+        h.at(T + 600, SUPER, 0);
+        h.at(T + 900, SUPER, 1);
+        h.at(T + 1000, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1, 0]);
+        assert_eq!(h.injector.erases, vec![6, 6]);
     }
 
     #[test]

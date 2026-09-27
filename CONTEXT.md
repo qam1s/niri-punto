@@ -19,8 +19,9 @@ they render in the new layout.
 _Avoid_: retype.
 
 **Trigger**:
-A Shift-key gesture (Double Shift and its Shift/Ctrl modifications) that
-starts a conversion, or undoes the previous one when repeated.
+A Shift-key gesture (Double Shift and its Shift/Ctrl modifications) or a
+lone Mod tap (tap for the word, Ctrl+tap for the selection) that starts a
+conversion, or undoes the previous one when repeated.
 _Avoid_: hotkey, shortcut.
 
 **Buffer entry**:

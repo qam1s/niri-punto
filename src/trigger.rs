@@ -10,6 +10,9 @@ pub const DOUBLE_SHIFT_WINDOW_MS: u64 = 400;
 pub const UNDO_WINDOW_MS: u64 = 3000;
 /// Presses faster than this after a release are switch bounce, not intent.
 pub const DEBOUNCE_MS: u64 = 30;
+/// A lone Mod press released within this window is a tap gesture. Longer
+/// holds are chord prefixes (or hesitation), never a tap.
+pub const TAP_WINDOW_MS: u64 = 300;
 
 /// Keys the machine cares about. Everything else is [`Key::Other`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -94,13 +97,16 @@ impl Side {
     }
 }
 
-/// Recognizes Double Shift gestures from a key event stream.
+/// Recognizes Double Shift gestures and lone Mod taps from a key event
+/// stream.
 ///
 /// Feed every press and release in order via [`TriggerMachine::key`]; it
 /// returns `Some(Gesture)` exactly at the second Shift press that completes
-/// a trigger, `None` otherwise. Autorepeat (press while already down) and
-/// bounce faster than [`DEBOUNCE_MS`] are ignored. Any non-modifier press
-/// between the two Shift presses cancels the pending pair.
+/// a trigger, or at the Mod release that completes a tap — `None`
+/// otherwise. Autorepeat (press while already down) and bounce faster than
+/// [`DEBOUNCE_MS`] are ignored. Any non-modifier press between the two
+/// Shift presses cancels the pending pair; a tap needs a clean
+/// press-to-release with no Shift, text, or second-Mod key in between.
 pub struct TriggerMachine {
     shift_down: [bool; 2],
     ctrl_down: [bool; 2],
@@ -108,6 +114,9 @@ pub struct TriggerMachine {
     first_press_ms: Option<u64>,
     disturbed: bool,
     last_release_ms: [Option<u64>; 2],
+    meta_release_ms: [Option<u64>; 2],
+    tap_press_ms: Option<u64>,
+    tap_disturbed: bool,
     last_gesture: Option<(GestureKind, u64)>,
 }
 
@@ -120,6 +129,9 @@ impl TriggerMachine {
             first_press_ms: None,
             disturbed: false,
             last_release_ms: [None, None],
+            meta_release_ms: [None, None],
+            tap_press_ms: None,
+            tap_disturbed: false,
             last_gesture: None,
         }
     }
@@ -159,17 +171,12 @@ impl TriggerMachine {
                 self.ctrl_down[Side::Right.index()] = pressed;
                 None
             }
-            Key::MetaLeft => {
-                self.meta_down[Side::Left.index()] = pressed;
-                None
-            }
-            Key::MetaRight => {
-                self.meta_down[Side::Right.index()] = pressed;
-                None
-            }
+            Key::MetaLeft => self.meta(Side::Left, pressed, now_ms),
+            Key::MetaRight => self.meta(Side::Right, pressed, now_ms),
             Key::Other => {
                 if pressed {
                     self.disturbed = true;
+                    self.tap_disturbed = true;
                 }
                 None
             }
@@ -179,6 +186,8 @@ impl TriggerMachine {
     fn shift(&mut self, side: Side, pressed: bool, now_ms: u64) -> Option<Gesture> {
         let i = side.index();
         if pressed {
+            // A Shift chord voids a Mod tap; the tap never voids a pair.
+            self.tap_disturbed = true;
             if self.shift_down[i] {
                 return None; // autorepeat, not a new press
             }
@@ -217,6 +226,55 @@ impl TriggerMachine {
             self.shift_down[i] = false;
             self.last_release_ms[i] = Some(now_ms);
             None
+        }
+    }
+
+    /// A lone Mod tap: press and release within [`TAP_WINDOW_MS`] with no
+    /// Shift, text, or second-Mod key in between, and no Shift held at
+    /// release. Completes on release (modifiers are free by definition,
+    /// except a held Ctrl — that resolves to Selection and the caller
+    /// defers it). Ctrl modifies like in a pair and never cancels; a Mod
+    /// press still disturbs a pending Shift pair, as before.
+    fn meta(&mut self, side: Side, pressed: bool, now_ms: u64) -> Option<Gesture> {
+        let i = side.index();
+        if pressed {
+            if self.meta_down[i] {
+                return None; // autorepeat, not a new press
+            }
+            if let Some(released) = self.meta_release_ms[i]
+                && now_ms.saturating_sub(released) < DEBOUNCE_MS
+            {
+                return None; // switch bounce
+            }
+            self.meta_down[i] = true;
+            self.tap_press_ms = Some(now_ms);
+            // The other side already down means a chord, not a tap.
+            self.tap_disturbed = self.meta_down[1 - i];
+            self.disturbed = true;
+            None
+        } else {
+            self.meta_down[i] = false;
+            self.meta_release_ms[i] = Some(now_ms);
+            let tap = match self.tap_press_ms {
+                Some(pressed_at)
+                    if !self.tap_disturbed
+                        && !self.shift_held()
+                        && now_ms.saturating_sub(pressed_at) <= TAP_WINDOW_MS =>
+                {
+                    let kind = if self.ctrl_held() {
+                        GestureKind::Selection
+                    } else {
+                        GestureKind::Word
+                    };
+                    let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= UNDO_WINDOW_MS);
+                    self.last_gesture = Some((kind, now_ms));
+                    Some(Gesture { kind, undo })
+                }
+                _ => None,
+            };
+            self.tap_press_ms = None;
+            self.tap_disturbed = false;
+            tap
         }
     }
 
@@ -470,6 +528,115 @@ mod tests {
         assert_eq!(release(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftRight, T + 10), None);
         assert_eq!(release(&mut m, Key::Other, T + 20), None);
+    }
+
+    fn mod_tap(m: &mut TriggerMachine, at: u64) -> Option<Gesture> {
+        assert_eq!(press(m, Key::MetaLeft, at), None);
+        release(m, Key::MetaLeft, at + 100)
+    }
+
+    #[test]
+    fn mod_tap_is_word() {
+        let mut m = TriggerMachine::new();
+        let g = mod_tap(&mut m, T);
+        assert_eq!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Word,
+                undo: false
+            })
+        );
+    }
+
+    #[test]
+    fn slow_mod_release_is_no_tap() {
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::MetaLeft, T), None);
+        assert_eq!(release(&mut m, Key::MetaLeft, T + TAP_WINDOW_MS + 50), None);
+    }
+
+    #[test]
+    fn key_between_mod_press_and_release_cancels_tap() {
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::MetaLeft, T), None);
+        assert_eq!(press(&mut m, Key::Other, T + 50), None);
+        assert_eq!(release(&mut m, Key::Other, T + 80), None);
+        assert_eq!(release(&mut m, Key::MetaLeft, T + 100), None);
+    }
+
+    #[test]
+    fn shift_press_cancels_mod_tap() {
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::MetaLeft, T), None);
+        assert_eq!(press(&mut m, Key::ShiftLeft, T + 50), None);
+        assert_eq!(release(&mut m, Key::ShiftLeft, T + 80), None);
+        assert_eq!(release(&mut m, Key::MetaLeft, T + 100), None);
+    }
+
+    #[test]
+    fn shift_held_through_release_voids_mod_tap() {
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
+        assert_eq!(press(&mut m, Key::MetaLeft, T + 50), None);
+        assert_eq!(release(&mut m, Key::MetaLeft, T + 100), None);
+        assert_eq!(release(&mut m, Key::ShiftLeft, T + 150), None);
+    }
+
+    #[test]
+    fn chord_of_both_metas_is_no_tap() {
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::MetaLeft, T), None);
+        assert_eq!(press(&mut m, Key::MetaRight, T + 50), None);
+        assert_eq!(release(&mut m, Key::MetaLeft, T + 100), None);
+        assert_eq!(release(&mut m, Key::MetaRight, T + 150), None);
+    }
+
+    #[test]
+    fn ctrl_plus_mod_tap_is_selection() {
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::CtrlLeft, T), None);
+        assert_eq!(press(&mut m, Key::MetaLeft, T + 50), None);
+        let g = release(&mut m, Key::MetaLeft, T + 150);
+        assert_eq!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Selection,
+                undo: false
+            })
+        );
+        assert_eq!(release(&mut m, Key::CtrlLeft, T + 200), None);
+    }
+
+    #[test]
+    fn repeated_mod_tap_undoes() {
+        let mut m = TriggerMachine::new();
+        let first = mod_tap(&mut m, T);
+        assert!(matches!(first, Some(Gesture { undo: false, .. })));
+        let second = mod_tap(&mut m, T + 500);
+        assert_eq!(
+            second,
+            Some(Gesture {
+                kind: GestureKind::Word,
+                undo: true
+            })
+        );
+    }
+
+    #[test]
+    fn meta_press_disturbs_shift_pair_but_tap_still_fires() {
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
+        assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
+        assert_eq!(press(&mut m, Key::MetaLeft, T + 100), None);
+        // The pair is disturbed, but the clean tap converts the word.
+        let g = release(&mut m, Key::MetaLeft, T + 200);
+        assert!(matches!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Word,
+                undo: false
+            })
+        ));
     }
 
     #[test]
