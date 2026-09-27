@@ -224,7 +224,6 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
     let mut settings = TriggerSettings::default();
     let mut timings_seen = false;
     let mut binds_seen = false;
-    let mut pair_seen = false;
     for node in document.nodes() {
         match node.name().value() {
             "tap" => {
@@ -249,13 +248,9 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
                 ));
             }
             "double-shift" => {
-                if pair_seen {
-                    return Err(ConfigError::BadDoubleShift(
-                        "more than one `double-shift` node: keep exactly one".to_string(),
-                    ));
-                }
-                pair_seen = true;
-                settings.pair_base = parse_double_shift(node)?;
+                return Err(ConfigError::BadDoubleShift(
+                    "`double-shift` moved inside the `binds` block (e.g. `binds { double-shift selection }`)".to_string(),
+                ));
             }
             "timings" => {
                 if timings_seen {
@@ -286,17 +281,6 @@ fn node_args(node: &kdl::KdlNode) -> Option<Vec<&str>> {
     Some(args)
 }
 
-fn parse_double_shift(node: &kdl::KdlNode) -> Result<GestureKind, ConfigError> {
-    match node_args(node).as_deref() {
-        Some([action]) => parse_action(action).map_err(|message| {
-            ConfigError::BadDoubleShift(format!("{message} (e.g. `double-shift selection`)"))
-        }),
-        _ => Err(ConfigError::BadDoubleShift(
-            "want exactly one action (e.g. `double-shift selection`)".to_string(),
-        )),
-    }
-}
-
 fn parse_action(action: &str) -> Result<GestureKind, String> {
     match action {
         "word" => Ok(GestureKind::Word),
@@ -315,6 +299,7 @@ fn parse_binds(node: &kdl::KdlNode, settings: &mut TriggerSettings) -> Result<()
         ));
     }
     let mut tap_seen = false;
+    let mut pair_seen = false;
     if let Some(children) = node.children() {
         for child in children.nodes() {
             match parse_bind(child)? {
@@ -332,17 +317,28 @@ fn parse_binds(node: &kdl::KdlNode, settings: &mut TriggerSettings) -> Result<()
                     tap_seen = true;
                     settings.tap_action = kind;
                 }
+                BindLine::PairBase(kind) => {
+                    if pair_seen {
+                        return Err(ConfigError::BadBind(
+                            "more than one `double-shift` line: keep exactly one".to_string(),
+                        ));
+                    }
+                    pair_seen = true;
+                    settings.pair_base = kind;
+                }
             }
         }
     }
     Ok(())
 }
 
-/// One parsed `binds` line: a single bind, a modifier-key pair, or the tap.
+/// One parsed `binds` line: a single bind, a modifier-key pair, the tap,
+/// or the plain-pair scope.
 enum BindLine {
     Bind(Bind),
     Binds(Bind, Bind),
     Tap(Option<GestureKind>),
+    PairBase(GestureKind),
 }
 
 /// One bind: the node name is the niri-style combo (`Mod+L`,
@@ -365,6 +361,11 @@ fn parse_bind(node: &kdl::KdlNode) -> Result<BindLine, ConfigError> {
         return Err(ConfigError::BadBind(format!("bad combo {combo:?}")));
     };
     if parts.is_empty() {
+        // `double-shift` lives here too, next to the other gestures.
+        if key.eq_ignore_ascii_case("double-shift") {
+            let kind = parse_action(action).map_err(ConfigError::BadBind)?;
+            return Ok(BindLine::PairBase(kind));
+        }
         // Bare key name: only a lone Mod is a tap.
         if !key.eq_ignore_ascii_case("mod") {
             return Err(ConfigError::BadBind(format!(
@@ -750,15 +751,25 @@ mod tests {
     }
 
     #[test]
-    fn double_shift_parses_and_defaults_to_word() {
+    fn double_shift_line_sets_pair_base() {
         let settings = parse_settings("layout \"us\" \"ru\"\n").unwrap();
         assert_eq!(settings.pair_base, GestureKind::Word);
-        let settings = parse_settings("layout \"us\" \"ru\"\ndouble-shift selection\n").unwrap();
+        let settings =
+            parse_settings("layout \"us\" \"ru\"\nbinds {\n double-shift selection\n}\n").unwrap();
         assert_eq!(settings.pair_base, GestureKind::Selection);
-        assert!(parse_settings("layout \"us\" \"ru\"\ndouble-shift turbo\n").is_err());
+        assert!(parse_settings("layout \"us\" \"ru\"\nbinds {\n double-shift turbo\n}\n").is_err());
         assert!(
-            parse_settings("layout \"us\" \"ru\"\ndouble-shift word\ndouble-shift word\n").is_err()
+            parse_settings(
+                "layout \"us\" \"ru\"\nbinds {\n double-shift word\n double-shift word\n}\n"
+            )
+            .is_err()
         );
+    }
+
+    #[test]
+    fn top_level_double_shift_fails_with_migration_hint() {
+        let error = parse_settings("layout \"us\" \"ru\"\ndouble-shift selection\n").unwrap_err();
+        assert!(error.to_string().contains("binds"), "{error}");
     }
 
     #[test]
