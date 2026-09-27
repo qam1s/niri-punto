@@ -18,6 +18,8 @@ pub enum Key {
     ShiftRight,
     CtrlLeft,
     CtrlRight,
+    MetaLeft,
+    MetaRight,
     Other,
 }
 
@@ -102,6 +104,7 @@ impl Side {
 pub struct TriggerMachine {
     shift_down: [bool; 2],
     ctrl_down: [bool; 2],
+    meta_down: [bool; 2],
     first_press_ms: Option<u64>,
     disturbed: bool,
     last_release_ms: [Option<u64>; 2],
@@ -113,6 +116,7 @@ impl TriggerMachine {
         Self {
             shift_down: [false, false],
             ctrl_down: [false, false],
+            meta_down: [false, false],
             first_press_ms: None,
             disturbed: false,
             last_release_ms: [None, None],
@@ -130,10 +134,17 @@ impl TriggerMachine {
         self.ctrl_down[0] || self.ctrl_down[1]
     }
 
-    /// No Shift or Ctrl held anywhere: replaying scancodes now renders
+    /// Mod (Super) currently held on either side. Tracked so a bind like
+    /// Mod+L waits for release: replaying scancodes under a held Mod lands
+    /// in the compositor's binds instead of the text field.
+    pub fn meta_held(&self) -> bool {
+        self.meta_down[0] || self.meta_down[1]
+    }
+
+    /// No Shift, Ctrl, or Mod held anywhere: replaying scancodes now renders
     /// exactly what the buffer holds, with no held-modifier interference.
     pub fn modifiers_free(&self) -> bool {
-        !self.shift_held() && !self.ctrl_held()
+        !self.shift_held() && !self.ctrl_held() && !self.meta_held()
     }
 
     pub fn key(&mut self, key: Key, pressed: bool, now_ms: u64) -> Option<Gesture> {
@@ -146,6 +157,14 @@ impl TriggerMachine {
             }
             Key::CtrlRight => {
                 self.ctrl_down[Side::Right.index()] = pressed;
+                None
+            }
+            Key::MetaLeft => {
+                self.meta_down[Side::Left.index()] = pressed;
+                None
+            }
+            Key::MetaRight => {
+                self.meta_down[Side::Right.index()] = pressed;
                 None
             }
             Key::Other => {
@@ -451,6 +470,21 @@ mod tests {
         assert_eq!(release(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftRight, T + 10), None);
         assert_eq!(release(&mut m, Key::Other, T + 20), None);
+    }
+
+    #[test]
+    fn held_meta_blocks_modifiers_free() {
+        let mut m = TriggerMachine::new();
+        assert!(m.modifiers_free());
+        press(&mut m, Key::MetaLeft, T);
+        assert!(!m.modifiers_free());
+        assert!(m.meta_held());
+        release(&mut m, Key::MetaLeft, T + 10);
+        assert!(m.modifiers_free());
+        press(&mut m, Key::MetaRight, T + 20);
+        assert!(!m.modifiers_free());
+        release(&mut m, Key::MetaRight, T + 30);
+        assert!(m.modifiers_free());
     }
 
     #[test]

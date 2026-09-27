@@ -414,55 +414,86 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
             }
         }
         while let Ok(request) = ctrl_rx.try_recv() {
-            // Binds fire while their own modifier may still be held (Mod in
-            // Mod+L): route through the same wait-for-release slot, else the
-            // replay lands as shortcuts/uppercase. Bound by the same timeout.
-            if !triggers.modifiers_free() {
-                let now_ms = start.elapsed().as_millis() as u64;
-                let kind = match request.kind {
-                    ControlKind::Word => GestureKind::Word,
-                    ControlKind::Selection => GestureKind::Selection,
-                };
-                pending = Some(PendingGesture::new(Gesture { kind, undo: false }, now_ms));
-                eprintln!(
-                    "control: {} deferred until modifiers release",
-                    request.kind.as_line().trim()
-                );
-                let _ = request
-                    .reply
-                    .send("ok deferred until modifiers release".to_string());
-                continue;
-            }
-            let answer = match request.kind {
-                ControlKind::Word => {
-                    let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
-                    match do_convert(&word, &mut converter, &mut ipc, &mut injector) {
-                        Ok(detail) => {
-                            // Bind conversions supersede a pending selection
-                            // undo, same as the gesture path.
-                            selection_converter.invalidate();
-                            format!("ok bind-word: {detail}")
-                        }
-                        Err(detail) => format!("err bind-word: {detail}"),
-                    }
-                }
-                ControlKind::Selection => {
-                    match do_convert_selection(
-                        &mut selection_converter,
-                        &mut converter,
-                        &mut ipc,
-                        &mut injector,
-                        &mut clipboard,
-                    ) {
-                        Ok(detail) => format!("ok bind-selection: {detail}"),
-                        Err(detail) => format!("err bind-selection: {detail}"),
-                    }
-                }
+            let mut daemon = Daemon {
+                triggers: &mut triggers,
+                buffer: &mut buffer,
+                converter: &mut converter,
+                selection_converter: &mut selection_converter,
+                detector: &detector,
+                ipc: &mut ipc,
+                injector: &mut injector,
+                clipboard: &mut clipboard,
             };
-            eprintln!("control: {} -> {answer}", request.kind.as_line().trim());
-            let _ = request.reply.send(answer);
+            let now_ms = start.elapsed().as_millis() as u64;
+            handle_control(request, now_ms, &mut daemon, &mut pending);
         }
     }
+}
+
+/// One niri-bind request: convert now, or stage into the wait-for-release
+/// slot while modifiers are physically held. A bind fires with its own
+/// modifier still down (Mod in Mod+L): replaying under it would render
+/// uppercase text or app shortcuts, so it waits like a gesture, bound by
+/// the same timeout.
+fn handle_control(
+    request: ControlRequest,
+    now_ms: u64,
+    daemon: &mut Daemon<impl Emitter, impl LayoutBackend, impl Clipboard>,
+    pending: &mut Option<PendingGesture>,
+) {
+    let Daemon {
+        triggers,
+        buffer,
+        converter,
+        selection_converter,
+        detector: _,
+        ipc,
+        injector,
+        clipboard,
+    } = daemon;
+    if !triggers.modifiers_free() {
+        let kind = match request.kind {
+            ControlKind::Word => GestureKind::Word,
+            ControlKind::Selection => GestureKind::Selection,
+        };
+        *pending = Some(PendingGesture::new(Gesture { kind, undo: false }, now_ms));
+        eprintln!(
+            "control: {} deferred until modifiers release",
+            request.kind.as_line().trim()
+        );
+        let _ = request
+            .reply
+            .send("ok deferred until modifiers release".to_string());
+        return;
+    }
+    let answer = match request.kind {
+        ControlKind::Word => {
+            let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
+            match do_convert(&word, converter, &mut **ipc, &mut **injector) {
+                Ok(detail) => {
+                    // Bind conversions supersede a pending selection
+                    // undo, same as the gesture path.
+                    selection_converter.invalidate();
+                    format!("ok bind-word: {detail}")
+                }
+                Err(detail) => format!("err bind-word: {detail}"),
+            }
+        }
+        ControlKind::Selection => {
+            match do_convert_selection(
+                selection_converter,
+                converter,
+                &mut **ipc,
+                &mut **injector,
+                &mut **clipboard,
+            ) {
+                Ok(detail) => format!("ok bind-selection: {detail}"),
+                Err(detail) => format!("err bind-selection: {detail}"),
+            }
+        }
+    };
+    eprintln!("control: {} -> {answer}", request.kind.as_line().trim());
+    let _ = request.reply.send(answer);
 }
 
 /// Mutable daemon state threaded through key handling (keeps `handle_key`
@@ -705,6 +736,9 @@ mod tests {
     const SHIFT: u16 = KeyCode::KEY_LEFTSHIFT.code();
     const SHIFT_RIGHT: u16 = KeyCode::KEY_RIGHTSHIFT.code();
     const CTRL: u16 = KeyCode::KEY_LEFTCTRL.code();
+    /// Mod (Super): held during a Mod+L bind, invisible to the trigger
+    /// machine until the fix.
+    const SUPER: u16 = KeyCode::KEY_LEFTMETA.code();
     /// `ghbdtn`-shaped word: six scancodes, layout-agnostic.
     const WORD: [u16; 6] = [34, 35, 32, 48, 49, 20];
 
@@ -853,6 +887,49 @@ mod tests {
         assert_eq!(h.ipc.switches, vec![1]);
         assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
         assert_eq!(h.injector.pastes, 1);
+    }
+
+    #[test]
+    fn bind_word_while_super_held_defers_until_release() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.at(T + 500, SUPER, 1); // Mod held, as in Mod+L
+        let now = h.now;
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let mut daemon = Daemon {
+                triggers: &mut h.triggers,
+                buffer: &mut h.buffer,
+                converter: &mut h.converter,
+                selection_converter: &mut h.selection_converter,
+                detector: &h.detector,
+                ipc: &mut h.ipc,
+                injector: &mut h.injector,
+                clipboard: &mut h.clipboard,
+            };
+            handle_control(
+                ControlRequest {
+                    kind: ControlKind::Word,
+                    reply: tx,
+                },
+                now,
+                &mut daemon,
+                &mut h.pending,
+            );
+        }
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(1)).unwrap(),
+            "ok deferred until modifiers release"
+        );
+        assert!(
+            h.injector.erases.is_empty(),
+            "replayed while Mod held: {:?}",
+            h.injector.erases
+        );
+        assert!(h.ipc.switches.is_empty());
+        h.at(T + 600, SUPER, 0); // release Mod: the staged request fires
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.injector.erases, vec![6]);
     }
 
     #[test]

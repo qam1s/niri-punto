@@ -44,6 +44,10 @@ pub fn classify(scancode: u16) -> Key {
         Key::CtrlLeft
     } else if scancode == KeyCode::KEY_RIGHTCTRL.code() {
         Key::CtrlRight
+    } else if scancode == KeyCode::KEY_LEFTMETA.code() {
+        Key::MetaLeft
+    } else if scancode == KeyCode::KEY_RIGHTMETA.code() {
+        Key::MetaRight
     } else {
         Key::Other
     }
@@ -244,6 +248,8 @@ mod tests {
         assert_eq!(classify(KeyCode::KEY_RIGHTSHIFT.code()), Key::ShiftRight);
         assert_eq!(classify(KeyCode::KEY_LEFTCTRL.code()), Key::CtrlLeft);
         assert_eq!(classify(KeyCode::KEY_RIGHTCTRL.code()), Key::CtrlRight);
+        assert_eq!(classify(KeyCode::KEY_LEFTMETA.code()), Key::MetaLeft);
+        assert_eq!(classify(KeyCode::KEY_RIGHTMETA.code()), Key::MetaRight);
         assert_eq!(classify(KeyCode::KEY_A.code()), Key::Other);
     }
 
@@ -282,6 +288,7 @@ mod tests {
         assert!(!is_typing_key(Key::Other, 0));
         assert!(!is_typing_key(Key::ShiftLeft, 1));
         assert!(!is_typing_key(Key::CtrlLeft, 1));
+        assert!(!is_typing_key(Key::MetaLeft, 1));
     }
 
     #[test]
