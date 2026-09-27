@@ -7,11 +7,11 @@
 //!
 //! Tuning (wider corpus, 199 cases, zero confident-wrong): confident when
 //! the average-log-prob gap reaches [`CONFIDENCE_MARGIN`] (2.6 per bigram)
-//! with at least [`MIN_LETTERS`] (3) scorable letters. Transliteration and
-//! tech Latin that scores strongly Us (`khorosho`, `api`, `spasibo`, …)
-//! verdicts Us rather than declining: the buffer was typed in the US
-//! layout, so a Us verdict is a no-op, while declining would risk Cyrillic
-//! conversion after an external layout switch.
+//! with at least [`MIN_LETTERS`] (3) scorable characters (letters and
+//! spaces). Latin input that scores strongly Us (`khorosho`, `api`,
+//! `spasibo`, …) verdicts Us rather than declining: the buffer was typed
+//! in the US layout, so a Us verdict is a no-op, while declining would risk
+//! Cyrillic conversion after an external layout switch.
 //!
 //! Not wired into any conversion path yet: nothing calls [`verdict`] outside
 //! tests, and the [`Detector`](crate::detector::Detector) seam keeps serving
@@ -26,59 +26,63 @@ use crate::config::LayoutPair;
 /// Minimum average-log-prob gap per bigram for a confident verdict.
 pub const CONFIDENCE_MARGIN: f32 = 2.6;
 
-/// Inputs with fewer scorable letters always decline.
+/// Inputs with fewer scorable characters (letters and spaces) decline.
 pub const MIN_LETTERS: usize = 3;
 
-/// evdev scancode -> (us char, ru char) for letters, space, and the
-/// punctuation covered by the selection path. Digits are layout-invariant
-/// and skipped by scoring.
+/// Canonical scancode table: evdev scancode -> (US-side char, RU-side char)
+/// for letters, space, and the punctuation covered by the selection path.
+/// Digits are layout-invariant and skipped by scoring.
 ///
-/// This is a scancode table, so it cannot reuse the char pairs in
+/// One source for [`render`] and both inverses below, so the arms cannot
+/// drift. This is a scancode table, so it cannot reuse the char pairs in
 /// [`crate::keymaps`]: those map pasted text for the selection path, while
 /// scoring must start from raw scancodes before any layout applies.
+const SCANCODE_TABLE: &[(u16, char, char)] = &[
+    (16, 'q', 'й'),
+    (17, 'w', 'ц'),
+    (18, 'e', 'у'),
+    (19, 'r', 'к'),
+    (20, 't', 'е'),
+    (21, 'y', 'н'),
+    (22, 'u', 'г'),
+    (23, 'i', 'ш'),
+    (24, 'o', 'щ'),
+    (25, 'p', 'з'),
+    (26, '[', 'х'),
+    (27, ']', 'ъ'),
+    (30, 'a', 'ф'),
+    (31, 's', 'ы'),
+    (32, 'd', 'в'),
+    (33, 'f', 'а'),
+    (34, 'g', 'п'),
+    (35, 'h', 'р'),
+    (36, 'j', 'о'),
+    (37, 'k', 'л'),
+    (38, 'l', 'д'),
+    (39, ';', 'ж'),
+    (40, '\'', 'э'),
+    (41, '`', 'ё'),
+    (44, 'z', 'я'),
+    (45, 'x', 'ч'),
+    (46, 'c', 'с'),
+    (47, 'v', 'м'),
+    (48, 'b', 'и'),
+    (49, 'n', 'т'),
+    (50, 'm', 'ь'),
+    (51, ',', 'б'),
+    (52, '.', 'ю'),
+    (53, '/', '.'),
+    (57, ' ', ' '),
+];
+
 fn render(entry: BufferEntry) -> Option<(char, char)> {
-    let (en, ru) = match entry.scancode {
-        16 => ('q', 'й'),
-        17 => ('w', 'ц'),
-        18 => ('e', 'у'),
-        19 => ('r', 'к'),
-        20 => ('t', 'е'),
-        21 => ('y', 'н'),
-        22 => ('u', 'г'),
-        23 => ('i', 'ш'),
-        24 => ('o', 'щ'),
-        25 => ('p', 'з'),
-        30 => ('a', 'ф'),
-        31 => ('s', 'ы'),
-        32 => ('d', 'в'),
-        33 => ('f', 'а'),
-        34 => ('g', 'п'),
-        35 => ('h', 'р'),
-        36 => ('j', 'о'),
-        37 => ('k', 'л'),
-        38 => ('l', 'д'),
-        44 => ('z', 'я'),
-        45 => ('x', 'ч'),
-        46 => ('c', 'с'),
-        47 => ('v', 'м'),
-        48 => ('b', 'и'),
-        49 => ('n', 'т'),
-        50 => ('m', 'ь'),
-        26 => ('[', 'х'),
-        27 => (']', 'ъ'),
-        39 => (';', 'ж'),
-        40 => ('\'', 'э'),
-        41 => ('`', 'ё'),
-        51 => (',', 'б'),
-        52 => ('.', 'ю'),
-        53 => ('/', '.'),
-        57 => (' ', ' '),
-        _ => return None,
-    };
+    let (_, en, ru) = SCANCODE_TABLE
+        .iter()
+        .find(|(scancode, _, _)| *scancode == entry.scancode)?;
     if entry.shift && en.is_ascii_alphabetic() {
-        Some((en.to_ascii_uppercase(), ru))
+        Some((en.to_ascii_uppercase(), *ru))
     } else {
-        Some((en, ru))
+        Some((*en, *ru))
     }
 }
 
@@ -86,7 +90,10 @@ fn index_of(symbols: &str, ch: char) -> Option<usize> {
     symbols.chars().position(|c| c == ch)
 }
 
-fn scorable_letters(us_text: &str) -> usize {
+/// Count the characters scoring can see: letters and spaces. Digits and
+/// punctuation never enter the bigram sequence; spaces do (the tuning
+/// counts them too, so this shape is load-bearing for the margin).
+fn scorable_chars(us_text: &str) -> usize {
     us_text
         .chars()
         .filter(|c| c.is_ascii_alphabetic() || *c == ' ')
@@ -151,72 +158,28 @@ pub fn entries_from_text(text: &str) -> Vec<BufferEntry> {
     out
 }
 
-/// Inverse of [`render`] over the US side.
+/// Inverse of [`render`] over the US side (letters only: the selection
+/// synthesis skips every other ASCII character).
 fn scancode_for_us(en: char) -> Option<u16> {
-    let scancode = match en {
-        'q' => 16,
-        'w' => 17,
-        'e' => 18,
-        'r' => 19,
-        't' => 20,
-        'y' => 21,
-        'u' => 22,
-        'i' => 23,
-        'o' => 24,
-        'p' => 25,
-        'a' => 30,
-        's' => 31,
-        'd' => 32,
-        'f' => 33,
-        'g' => 34,
-        'h' => 35,
-        'j' => 36,
-        'k' => 37,
-        'l' => 38,
-        'z' => 44,
-        'x' => 45,
-        'c' => 46,
-        'v' => 47,
-        'b' => 48,
-        'n' => 49,
-        'm' => 50,
-        _ => return None,
-    };
-    Some(scancode)
+    if !en.is_ascii_alphabetic() {
+        return None;
+    }
+    SCANCODE_TABLE
+        .iter()
+        .find(|(_, us, _)| *us == en)
+        .map(|(scancode, _, _)| *scancode)
 }
 
-/// Inverse of [`render`] over the RU side.
+/// Inverse of [`render`] over the RU side (letters only, same as above;
+/// `ё` shares `е`'s scancode).
 fn scancode_for_ru(ru: char) -> Option<u16> {
-    let scancode = match ru {
-        'й' => 16,
-        'ц' => 17,
-        'у' => 18,
-        'к' => 19,
-        'е' | 'ё' => 20,
-        'н' => 21,
-        'г' => 22,
-        'ш' => 23,
-        'щ' => 24,
-        'з' => 25,
-        'ф' => 30,
-        'ы' => 31,
-        'в' => 32,
-        'а' => 33,
-        'п' => 34,
-        'р' => 35,
-        'о' => 36,
-        'л' => 37,
-        'д' => 38,
-        'я' => 44,
-        'ч' => 45,
-        'с' => 46,
-        'м' => 47,
-        'и' => 48,
-        'т' => 49,
-        'ь' => 50,
-        _ => return None,
-    };
-    Some(scancode)
+    if ru == 'ё' {
+        return Some(20);
+    }
+    SCANCODE_TABLE
+        .iter()
+        .find(|(_, us, cyrillic)| *cyrillic == ru && us.is_ascii_alphabetic())
+        .map(|(scancode, _, _)| *scancode)
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Intended {
@@ -245,7 +208,7 @@ pub enum Verdict {
 
 /// Verdict the intended layout for buffer entries, or decline.
 /// Confident only past [`CONFIDENCE_MARGIN`] with [`MIN_LETTERS`] scorable
-/// letters; anything else declines to today's `current_layout` behavior.
+/// characters; anything else declines to today's `current_layout` behavior.
 pub fn verdict(entries: &[BufferEntry]) -> Verdict {
     let mut us_text = String::new();
     let mut ru_text = String::new();
@@ -264,7 +227,7 @@ pub fn verdict(entries: &[BufferEntry]) -> Verdict {
 /// [`entries_from_text`] and calls [`verdict`] instead, so both paths share
 /// one scoring core.
 fn verdict_rendered(us_text: &str, ru_text: &str) -> Verdict {
-    if scorable_letters(us_text) < MIN_LETTERS {
+    if scorable_chars(us_text) < MIN_LETTERS {
         return Verdict::Decline;
     }
     let us = score(us_text, tables::EN_SYMBOLS, &tables::EN, tables::EN_N);
@@ -287,7 +250,9 @@ fn verdict_rendered(us_text: &str, ru_text: &str) -> Verdict {
 mod tests {
     use super::*;
 
-    /// Inverse for tests: us text -> buffer entries.
+    /// Inverse for tests: us text -> buffer entries. Letters delegate to
+    /// the production inverse so the arms cannot drift; punctuation and
+    /// space rows stay local (scaffolding for inputs scoring skips).
     fn keys(us_text: &str) -> Vec<BufferEntry> {
         let mut out = Vec::new();
         for ch in us_text.chars() {
@@ -297,32 +262,6 @@ mod tests {
                 (ch, false)
             };
             let scancode = match lower {
-                'q' => 16,
-                'w' => 17,
-                'e' => 18,
-                'r' => 19,
-                't' => 20,
-                'y' => 21,
-                'u' => 22,
-                'i' => 23,
-                'o' => 24,
-                'p' => 25,
-                'a' => 30,
-                's' => 31,
-                'd' => 32,
-                'f' => 33,
-                'g' => 34,
-                'h' => 35,
-                'j' => 36,
-                'k' => 37,
-                'l' => 38,
-                'z' => 44,
-                'x' => 45,
-                'c' => 46,
-                'v' => 47,
-                'b' => 48,
-                'n' => 49,
-                'm' => 50,
                 '[' => 26,
                 ']' => 27,
                 ';' => 39,
@@ -332,44 +271,22 @@ mod tests {
                 '.' => 52,
                 '/' => 53,
                 ' ' => 57,
-                _ => continue,
+                _ => match scancode_for_us(lower) {
+                    Some(scancode) => scancode,
+                    None => continue,
+                },
             };
             out.push(BufferEntry { scancode, shift });
         }
         out
     }
 
-    /// Scancodes for text typed while the RU layout was active.
+    /// Scancodes for text typed while the RU layout was active. Same split:
+    /// letters delegate, punctuation stays local.
     fn keys_ru(ru_text: &str) -> Vec<BufferEntry> {
         let mut out = Vec::new();
         for ch in ru_text.chars().flat_map(|c| c.to_lowercase()) {
             let scancode = match ch {
-                'й' => 16,
-                'ц' => 17,
-                'у' => 18,
-                'к' => 19,
-                'е' | 'ё' => 20,
-                'н' => 21,
-                'г' => 22,
-                'ш' => 23,
-                'щ' => 24,
-                'з' => 25,
-                'ф' => 30,
-                'ы' => 31,
-                'в' => 32,
-                'а' => 33,
-                'п' => 34,
-                'р' => 35,
-                'о' => 36,
-                'л' => 37,
-                'д' => 38,
-                'я' => 44,
-                'ч' => 45,
-                'с' => 46,
-                'м' => 47,
-                'и' => 48,
-                'т' => 49,
-                'ь' => 50,
                 'х' => 26,
                 'ъ' => 27,
                 'ж' => 39,
@@ -378,7 +295,10 @@ mod tests {
                 'ю' => 52,
                 '.' => 53,
                 ' ' => 57,
-                _ => continue,
+                _ => match scancode_for_ru(ch) {
+                    Some(scancode) => scancode,
+                    None => continue,
+                },
             };
             out.push(BufferEntry {
                 scancode,
@@ -549,8 +469,8 @@ mod tests {
     }
 
     #[test]
-    fn transliteration_us_confident() {
-        // Latin transliteration typed in the US layout: Us verdicts are
+    fn latin_input_us_confident() {
+        // Latin input typed in the US layout: Us verdicts are
         // no-ops, so confidence here is safe (a decline would risk Cyrillic
         // conversion after an external layout switch). See module docs.
         assert_verdict(
@@ -639,9 +559,9 @@ mod tests {
     }
 
     #[test]
-    fn transliteration_ambiguous_declines() {
-        // Transliteration indistinguishable from source-language text: all
-        // below the margin.
+    fn ambiguous_latin_declines() {
+        // Latin input scoring near the source language: all below the
+        // margin.
         assert_verdict(
             &[
                 "privet",
@@ -657,7 +577,7 @@ mod tests {
     #[test]
     fn mixed_language_buffers_decline() {
         // Whole-buffer phrase scope scores mixed content as mush: decline to
-        // today's behavior. Acceptable, not a fix.
+        // today's behavior. Acceptable; narrower scopes stay out of scope.
         for (us, ru) in [
             ("hello ", "мир"),
             ("switch ", "окно"),
