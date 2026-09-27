@@ -127,13 +127,15 @@ fn wait_for_barrier(ipc: &mut impl LayoutBackend, target: u8) -> bool {
 /// Fresh conversion of `entries`, shared by gestures and bind requests.
 /// `phrase` is the whole buffer: the detector verdicts its scope, so an
 /// external layout switch between typing and triggering cannot divert the
-/// hop target. A confident verdict converts toward the intended layout
-/// (ignoring which layout is current); a decline keeps today's
-/// `current_layout` behavior. Returns the one-line detail for daemon logs
-/// and socket replies.
+/// hop target. A confident verdict converts toward the intended layout,
+/// except when the layout has not moved since typing and the verdict
+/// agrees with it (see [`Converter::convert_toward`]); a decline keeps
+/// today's `current_layout` behavior. Returns the one-line detail for
+/// daemon logs and socket replies.
 fn do_convert(
     entries: &[BufferEntry],
     phrase: &[BufferEntry],
+    birth: Option<u8>,
     detector: &dyn Detector,
     converter: &mut Converter,
     ipc: &mut impl LayoutBackend,
@@ -143,7 +145,9 @@ fn do_convert(
         .current_layout()
         .map_err(|error| format!("layout read failed: {error}"))?;
     let plan = match detector.verdict(phrase) {
-        Verdict::Intended(intended) => converter.convert_toward(entries, intended, current, count),
+        Verdict::Intended(intended) => {
+            converter.convert_toward(entries, intended, current, count, birth)
+        }
         Verdict::Decline => converter.convert(entries, current, count),
     }
     .map_err(|error| format!("skipped ({error})"))?;
@@ -534,6 +538,7 @@ fn handle_control(
             match do_convert(
                 &word,
                 buffer.phrase(),
+                buffer.birth_layout(),
                 *detector,
                 converter,
                 &mut **ipc,
@@ -543,6 +548,9 @@ fn handle_control(
                     // Bind conversions supersede a pending selection
                     // undo, same as the gesture path.
                     selection_converter.invalidate();
+                    if let Some(target) = converter.last_target() {
+                        buffer.reanchor(target);
+                    }
                     format!("ok bind-word: {detail}")
                 }
                 Err(detail) => format!("err bind-word: {detail}"),
@@ -557,7 +565,12 @@ fn handle_control(
                 &mut **clipboard,
                 *detector,
             ) {
-                Ok(detail) => format!("ok bind-selection: {detail}"),
+                Ok(detail) => {
+                    if let Some(target) = selection_converter.last_target() {
+                        buffer.reanchor(target);
+                    }
+                    format!("ok bind-selection: {detail}")
+                }
                 Err(detail) => format!("err bind-selection: {detail}"),
             }
         }
@@ -599,12 +612,14 @@ fn note_focus(
     match daemon.ipc.focused_window_id() {
         Ok(focus) => {
             *focus_broken = false;
-            if last_focus.replace(focus).is_some_and(|old| old != focus) {
-                daemon.buffer.clear();
-                daemon.converter.invalidate();
-                daemon.selection_converter.invalidate();
-                *pending = None;
-                eprintln!("focus: window changed, buffer cleared");
+            if let Some(old) = last_focus.replace(focus) {
+                if old != focus {
+                    daemon.buffer.clear();
+                    daemon.converter.invalidate();
+                    daemon.selection_converter.invalidate();
+                    *pending = None;
+                    eprintln!("focus: window changed ({old:?} -> {focus:?}), buffer cleared");
+                }
             }
         }
         Err(error) => {
@@ -662,6 +677,14 @@ fn handle_key_at(
         converter.invalidate();
         selection_converter.invalidate();
         *pending = None;
+        // Anchor the fill to the layout it is typed under (one IPC query
+        // per fill): a confident verdict only overrides the current layout
+        // when the layout moved since typing (external switch).
+        if buffer.birth_layout().is_none() {
+            if let Ok((current, _)) = ipc.current_layout() {
+                buffer.note_birth(current);
+            }
+        }
         if raw.value == 1 {
             if reader::is_reset(raw.scancode) {
                 buffer.clear();
@@ -710,6 +733,9 @@ fn handle_key_at(
         GestureKind::Word => {
             if staged.undo && converter.has_pending_undo() {
                 if let Some(detail) = do_undo(converter, &mut **ipc, &mut **injector) {
+                    if let Some(target) = converter.last_target() {
+                        buffer.reanchor(target);
+                    }
                     eprintln!("undo: {detail}");
                 }
                 return;
@@ -734,6 +760,7 @@ fn handle_key_at(
             match do_convert(
                 &word,
                 buffer.phrase(),
+                buffer.birth_layout(),
                 *detector,
                 converter,
                 &mut **ipc,
@@ -744,6 +771,9 @@ fn handle_key_at(
                     // selection undo: "repeat" only undoes the
                     // immediately preceding conversion.
                     selection_converter.invalidate();
+                    if let Some(target) = converter.last_target() {
+                        buffer.reanchor(target);
+                    }
                     eprintln!("convert: {detail}");
                 }
                 Err(detail) => eprintln!("convert: {detail}"),
@@ -752,6 +782,9 @@ fn handle_key_at(
         GestureKind::Phrase => {
             if staged.undo && converter.has_pending_undo() {
                 if let Some(detail) = do_undo(converter, &mut **ipc, &mut **injector) {
+                    if let Some(target) = converter.last_target() {
+                        buffer.reanchor(target);
+                    }
                     eprintln!("undo: {detail}");
                 }
                 return;
@@ -760,12 +793,18 @@ fn handle_key_at(
             match do_convert(
                 &phrase,
                 &phrase,
+                buffer.birth_layout(),
                 *detector,
                 converter,
                 &mut **ipc,
                 &mut **injector,
             ) {
-                Ok(detail) => eprintln!("phrase: {detail}"),
+                Ok(detail) => {
+                    if let Some(target) = converter.last_target() {
+                        buffer.reanchor(target);
+                    }
+                    eprintln!("phrase: {detail}")
+                }
                 Err(detail) => eprintln!("phrase: {detail}"),
             }
         }
@@ -776,10 +815,10 @@ fn handle_key_at(
                         "undo selection: paste back after layout {}",
                         plan.hop.target
                     );
-                    if let Err(detail) =
-                        apply_selection_plan(&mut **ipc, &mut **injector, &mut **clipboard, &plan)
+                    match apply_selection_plan(&mut **ipc, &mut **injector, &mut **clipboard, &plan)
                     {
-                        eprintln!("undo selection: {detail}");
+                        Ok(()) => buffer.reanchor(plan.hop.target),
+                        Err(detail) => eprintln!("undo selection: {detail}"),
                     }
                 }
                 return;
@@ -792,7 +831,12 @@ fn handle_key_at(
                 &mut **clipboard,
                 *detector,
             ) {
-                Ok(detail) => eprintln!("convert selection: {detail}"),
+                Ok(detail) => {
+                    if let Some(target) = selection_converter.last_target() {
+                        buffer.reanchor(target);
+                    }
+                    eprintln!("convert selection: {detail}")
+                }
                 Err(detail) => eprintln!("convert selection: {detail}"),
             }
         }
@@ -1144,6 +1188,40 @@ mod tests {
         today.ipc.current = 1;
         today.double_shift(T + 500);
         assert_eq!(today.ipc.switches, vec![0]);
+    }
+
+    #[test]
+    fn unchanged_layout_agreeing_verdict_flips_for_convert_away() {
+        // Typed under ru, still ru, RU verdict for `ghbdtn` keystrokes: no
+        // external switch happened, so the user converts away — mechanical
+        // flip to us instead of a no-op hop and no-op undos.
+        let mut h = Harness::with_detector(Box::new(BigramDetector));
+        h.ipc.current = 1;
+        h.type_codes(T, &GHBTDN);
+        h.at(T + 500, SUPER, 1);
+        h.at(T + 600, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![0]);
+        assert_eq!(h.injector.erases, vec![6]);
+    }
+
+    #[test]
+    fn second_word_after_a_flip_reanchors_and_converts_away() {
+        // Word 1 flips us->ru; the frozen buffer must not keep the stale
+        // birth: word 2 (typed under ru, RU verdict, current ru) flips
+        // back instead of flapping a no-op hop.
+        let mut h = Harness::with_detector(Box::new(BigramDetector));
+        h.type_codes(T, &GHBTDN);
+        h.double_shift(T + 500);
+        assert_eq!(h.ipc.switches, vec![1]);
+        // Space plus word 2 under the new layout (typing also retires the
+        // pending undo, so the tap below converts fresh).
+        h.at(T + 2000, KeyCode::KEY_SPACE.code(), 1);
+        h.at(T + 2010, KeyCode::KEY_SPACE.code(), 0);
+        h.type_codes(T + 2100, &GHBTDN);
+        h.at(T + 3000, SUPER, 1);
+        h.at(T + 3100, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1, 0]);
+        assert_eq!(h.injector.erases, vec![6, 6]);
     }
 
     #[test]

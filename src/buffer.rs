@@ -18,6 +18,11 @@ pub struct BufferEntry {
 pub struct InputBuffer {
     entries: Vec<BufferEntry>,
     capacity: usize,
+    /// Layout index when the first entry after a clear arrived (`None`
+    /// while empty): anchors the external-switch check — a confident
+    /// verdict only overrides the current layout when the layout moved
+    /// since typing.
+    birth_layout: Option<u8>,
 }
 
 /// Default bound: far more than any word or phrase replay needs.
@@ -28,7 +33,30 @@ impl InputBuffer {
         Self {
             entries: Vec::new(),
             capacity: capacity.max(1),
+            birth_layout: None,
         }
+    }
+
+    /// Record the layout the current fill was typed under. Sticks while
+    /// entries remain (later switches do not move it); [`clear`](Self::clear)
+    /// resets it for the next fill.
+    pub fn note_birth(&mut self, layout: u8) {
+        if self.birth_layout.is_none() {
+            self.birth_layout = Some(layout);
+        }
+    }
+
+    /// Layout recorded by [`note_birth`](Self::note_birth), if any fill
+    /// has started since the last clear.
+    pub fn birth_layout(&self) -> Option<u8> {
+        self.birth_layout
+    }
+
+    /// Move the anchor to `layout` after a successful apply: the replayed
+    /// text now matches that layout, so later fills must not inherit the
+    /// pre-conversion anchor (the buffer itself stays frozen for undo).
+    pub fn reanchor(&mut self, layout: u8) {
+        self.birth_layout = Some(layout);
     }
 
     pub fn push(&mut self, entry: BufferEntry) {
@@ -41,6 +69,7 @@ impl InputBuffer {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.birth_layout = None;
     }
 
     // `len`/`entries` are the read seam for tickets 09/10 (selection,
@@ -194,5 +223,20 @@ mod tests {
         buf.push(entry(30));
         buf.clear();
         assert_eq!(buf.len(), 0);
+    }
+
+    #[test]
+    fn birth_layout_sticks_for_the_fill_and_resets_on_clear() {
+        let mut buf = InputBuffer::default();
+        assert_eq!(buf.birth_layout(), None);
+        buf.note_birth(1);
+        buf.push(entry(30));
+        // A later switch does not move the anchor.
+        buf.note_birth(0);
+        assert_eq!(buf.birth_layout(), Some(1));
+        buf.clear();
+        assert_eq!(buf.birth_layout(), None);
+        buf.note_birth(0);
+        assert_eq!(buf.birth_layout(), Some(0));
     }
 }
