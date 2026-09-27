@@ -14,6 +14,7 @@
 use crate::config::LayoutPair;
 use crate::convert::ConversionError;
 use crate::keymaps;
+use crate::scorer::Intended;
 use crate::undo::{LayoutCtx, LayoutHop, Reversible, UndoChain};
 
 /// One selection step: clipboard text to write and layout hop to take.
@@ -39,10 +40,8 @@ impl Reversible for SelectionPlan {
 }
 
 /// Plan a conversion of the selected `text` inside `ctx`. The current layout
-/// names the source alphabet: text in the first layout maps to the second,
-/// text in the second maps back. Pair order is the contract: the first entry
-/// is the Latin side, the second the Cyrillic side (see the `layouts`
-/// config).
+/// names the source alphabet via the pair order: text under the Latin side
+/// maps to Cyrillic, text under the Cyrillic side maps back.
 pub fn plan_selection(text: &str, ctx: LayoutCtx<'_>) -> Result<SelectionPlan, ConversionError> {
     if text.is_empty() {
         return Err(ConversionError::Empty);
@@ -50,7 +49,27 @@ pub fn plan_selection(text: &str, ctx: LayoutCtx<'_>) -> Result<SelectionPlan, C
     Ok(SelectionPlan {
         hop: ctx.hop()?,
         original: text.to_string(),
-        converted: keymaps::convert(text, ctx.current == 1),
+        converted: keymaps::convert(text, ctx.current != ctx.pair.latin_index()),
+    })
+}
+
+/// Plan a conversion toward a confident detector verdict's intended
+/// layout: the hop target is the intended pair position (ignoring which
+/// layout is current), and the text maps toward the intended alphabet
+/// rather than away from the current one. Refusals match
+/// [`plan_selection`] exactly, so a decline falls back byte-identical.
+pub fn plan_selection_toward(
+    text: &str,
+    intended: Intended,
+    ctx: LayoutCtx<'_>,
+) -> Result<SelectionPlan, ConversionError> {
+    if text.is_empty() {
+        return Err(ConversionError::Empty);
+    }
+    Ok(SelectionPlan {
+        hop: ctx.hop_toward(intended.index_in(ctx.pair))?,
+        original: text.to_string(),
+        converted: keymaps::convert(text, intended == Intended::Us),
     })
 }
 
@@ -80,6 +99,28 @@ impl SelectionConverter {
     ) -> Result<SelectionPlan, ConversionError> {
         let plan = plan_selection(
             text,
+            LayoutCtx {
+                current,
+                count: layout_count,
+                pair: &self.pair,
+            },
+        )?;
+        self.chain.remember(plan.clone());
+        Ok(plan)
+    }
+
+    /// Plan a fresh conversion toward a confident verdict's intended
+    /// layout and remember it for a later undo.
+    pub fn convert_toward(
+        &mut self,
+        text: &str,
+        intended: Intended,
+        current: u8,
+        layout_count: usize,
+    ) -> Result<SelectionPlan, ConversionError> {
+        let plan = plan_selection_toward(
+            text,
+            intended,
             LayoutCtx {
                 current,
                 count: layout_count,
@@ -149,6 +190,48 @@ mod tests {
     fn non_latin_selection_survives() {
         let plan = plan_selection("ghbdtn 👋", ctx(&pair(), 0, 2)).unwrap();
         assert_eq!(plan.converted, "привет 👋");
+    }
+
+    #[test]
+    fn toward_maps_to_the_intended_alphabet_from_any_current() {
+        // Diverged current layout: Latin text with RU current still maps
+        // EN->RU and hops to the RU position.
+        let plan = plan_selection_toward("ghbdtn", Intended::Ru, ctx(&pair(), 1, 2)).unwrap();
+        assert_eq!(plan.converted, "привет");
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 1));
+        // Intended Us maps back even from the RU side.
+        let plan = plan_selection_toward("hello", Intended::Us, ctx(&pair(), 1, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
+        // Refusals match plan_selection exactly.
+        assert_eq!(
+            plan_selection_toward("", Intended::Ru, ctx(&pair(), 0, 2)),
+            Err(ConversionError::Empty)
+        );
+        assert_eq!(
+            plan_selection_toward("ghbdtn", Intended::Ru, ctx(&pair(), 2, 3)),
+            plan_selection("ghbdtn", ctx(&pair(), 2, 3))
+        );
+    }
+
+    #[test]
+    fn swapped_pair_resolves_hop_target_and_alphabet() {
+        let swapped = LayoutPair::new("ru", "us").unwrap();
+        // Confident Cyrillic verdict hops to position 0 with EN->RU text.
+        let plan = plan_selection_toward("ghbdtn", Intended::Ru, ctx(&swapped, 1, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
+        assert_eq!(plan.converted, "привет");
+        // Intended Latin hops to position 1 with RU->EN text.
+        let plan = plan_selection_toward("привет", Intended::Us, ctx(&swapped, 0, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
+        assert_eq!(plan.converted, "ghbdtn");
+        // Decline path reads the source alphabet from the pair order too:
+        // Cyrillic under current 0 maps RU->EN while hopping to 1.
+        let plan = plan_selection("привет", ctx(&swapped, 0, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
+        assert_eq!(plan.converted, "ghbdtn");
+        let plan = plan_selection("ghbdtn", ctx(&swapped, 1, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
+        assert_eq!(plan.converted, "привет");
     }
 
     #[test]

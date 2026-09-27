@@ -79,6 +79,32 @@ impl LayoutPair {
             _ => None,
         }
     }
+
+    /// Pair position holding the Latin layout (`layout ru,us` is legal, so
+    /// callers must not assume position 0). The base subtag names the
+    /// language; a code from the Cyrillic set puts Latin second, anything
+    /// else keeps today's first-is-Latin behavior.
+    pub fn latin_index(&self) -> u8 {
+        if is_cyrillic_layout(&self.first) {
+            1
+        } else {
+            0
+        }
+    }
+}
+
+/// Whether an xkb layout code names a Cyrillic-script layout, compared
+/// case-insensitively on the base subtag (`ru`, not `ru+phonetic`).
+fn is_cyrillic_layout(code: &str) -> bool {
+    let base: String = code
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_lowercase();
+    matches!(
+        base.as_str(),
+        "ru" | "ua" | "by" | "bg" | "mk" | "rs" | "kz" | "kg" | "tj" | "mn"
+    )
 }
 
 /// Why a config could not be loaded or understood.
@@ -663,6 +689,22 @@ mod tests {
         assert_eq!(pair.get(0), Some("us"));
         assert_eq!(pair.get(1), Some("ru"));
         assert_eq!(pair.get(2), None);
+    }
+
+    #[test]
+    fn latin_index_follows_the_pair_order() {
+        assert_eq!(LayoutPair::new("us", "ru").unwrap().latin_index(), 0);
+        assert_eq!(LayoutPair::new("ru", "us").unwrap().latin_index(), 1);
+        assert_eq!(LayoutPair::new("de", "ru").unwrap().latin_index(), 0);
+        assert_eq!(LayoutPair::new("ru", "de").unwrap().latin_index(), 1);
+        // Case and variant spellings still resolve; unknown codes keep
+        // today's first-is-Latin behavior.
+        assert_eq!(LayoutPair::new("RU", "US").unwrap().latin_index(), 1);
+        assert_eq!(
+            LayoutPair::new("us", "ru+phonetic").unwrap().latin_index(),
+            0
+        );
+        assert_eq!(LayoutPair::new("us", "de").unwrap().latin_index(), 0);
     }
 
     #[test]
