@@ -186,12 +186,23 @@ pub fn user_commands() -> Vec<Command> {
 }
 
 /// The escalated udev step: install the rule, reload, trigger.
+/// The trigger replays `add` (scoped to the input subsystem): logind writes
+/// uaccess ACLs on add events, so already-present devices become readable
+/// without a reboot or replug. A bare `trigger` (change) only retags them.
 pub fn udev_commands(rule_src: &Path) -> Vec<Command> {
     let src = rule_src.to_string_lossy().to_string();
     vec![
         Command::new("sudo", &["install", "-m", "644", &src, doctor::RULE_DEST]),
         Command::new("sudo", &["udevadm", "control", "--reload-rules"]),
-        Command::new("sudo", &["udevadm", "trigger"]),
+        Command::new(
+            "sudo",
+            &[
+                "udevadm",
+                "trigger",
+                "--action=add",
+                "--subsystem-match=input",
+            ],
+        ),
     ]
 }
 
@@ -386,6 +397,9 @@ mod tests {
     fn embedded_rule_grants_uaccess() {
         assert!(RULE_SOURCE.contains("uaccess"));
         assert!(RULE_SOURCE.contains("SUBSYSTEM==\"input\""));
+        // The daemon injects through /dev/uinput (root-only by default,
+        // tagged by no stock rule): without this line it exits on start.
+        assert!(RULE_SOURCE.contains("KERNEL==\"uinput\""));
     }
 
     #[test]
@@ -448,6 +462,10 @@ mod tests {
         assert!(manual.contains("sudo install -m 644"));
         assert!(manual.contains(doctor::RULE_DEST));
         assert!(manual.contains("udevadm control --reload-rules"));
+        // Add (not change) events are what make logind write uaccess ACLs
+        // onto already-present devices (no reboot/replug needed).
+        assert!(manual.contains("--action=add"));
+        assert!(manual.contains("--subsystem-match=input"));
     }
 
     #[test]
