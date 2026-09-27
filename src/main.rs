@@ -27,9 +27,7 @@ mod inject;
 mod ipc;
 mod keymaps;
 mod reader;
-// Bigram scorer for the detector seam: not consulted by any path yet, so
-// the module stays allow(dead_code) until the direction verdict lands.
-#[allow(dead_code)]
+// Bigram scorer for direction verdicts behind the detector seam.
 mod scorer;
 mod selection;
 mod setup;
@@ -40,10 +38,11 @@ use buffer::{BufferEntry, InputBuffer};
 use clipboard::Clipboard;
 use control::{ControlKind, ControlRequest};
 use convert::{ConversionPlan, Converter};
-use detector::{Detector, ManualOnly};
+use detector::{BigramDetector, Detector};
 use inject::{Emitter, Injector};
 use ipc::{IpcClient, LayoutBackend};
 use reader::Reader;
+use scorer::Verdict;
 use selection::{SelectionConverter, SelectionPlan};
 use std::path::PathBuf;
 use std::sync::mpsc;
@@ -117,9 +116,16 @@ fn wait_for_barrier(ipc: &mut impl LayoutBackend, target: u8) -> bool {
 }
 
 /// Fresh conversion of `entries`, shared by gestures and bind requests.
-/// Returns the one-line detail for daemon logs and socket replies.
+/// `phrase` is the whole buffer: the detector verdicts its scope, so an
+/// external layout switch between typing and triggering cannot divert the
+/// hop target. A confident verdict converts toward the intended layout
+/// (ignoring which layout is current); a decline keeps today's
+/// `current_layout` behavior. Returns the one-line detail for daemon logs
+/// and socket replies.
 fn do_convert(
     entries: &[BufferEntry],
+    phrase: &[BufferEntry],
+    detector: &dyn Detector,
     converter: &mut Converter,
     ipc: &mut impl LayoutBackend,
     injector: &mut impl Emitter,
@@ -127,9 +133,13 @@ fn do_convert(
     let (current, count) = ipc
         .current_layout()
         .map_err(|error| format!("layout read failed: {error}"))?;
-    let plan = converter
-        .convert(entries, current, count)
-        .map_err(|error| format!("skipped ({error})"))?;
+    let plan = match detector.verdict(phrase) {
+        Verdict::Intended(intended) => {
+            converter.convert_toward(entries, intended.index(), current, count)
+        }
+        Verdict::Decline => converter.convert(entries, current, count),
+    }
+    .map_err(|error| format!("skipped ({error})"))?;
     let detail = format!(
         "erase {} then replay after layout {} (from {current})",
         plan.erase, plan.hop.target
@@ -141,6 +151,9 @@ fn do_convert(
 }
 
 /// Fresh selection conversion, shared by the gesture and bind requests.
+/// Like [`do_convert`], a confident verdict on the selection text converts
+/// toward the intended layout (hop target and alphabet mapping); a decline
+/// keeps today's `current_layout` behavior.
 /// Returns the one-line detail for daemon logs and socket replies.
 fn do_convert_selection(
     selection_converter: &mut SelectionConverter,
@@ -148,6 +161,7 @@ fn do_convert_selection(
     ipc: &mut impl LayoutBackend,
     injector: &mut impl Emitter,
     clipboard: &mut impl Clipboard,
+    detector: &dyn Detector,
 ) -> Result<String, String> {
     let (current, count) = ipc
         .current_layout()
@@ -155,9 +169,13 @@ fn do_convert_selection(
     let text = clipboard
         .read_selection()
         .map_err(|error| format!("clipboard read failed: {error}"))?;
-    let plan = selection_converter
-        .convert(&text, current, count)
-        .map_err(|error| format!("skipped ({error})"))?;
+    let plan = match detector.verdict(&scorer::entries_from_text(&text)) {
+        Verdict::Intended(intended) => {
+            selection_converter.convert_toward(&text, intended, current, count)
+        }
+        Verdict::Decline => selection_converter.convert(&text, current, count),
+    }
+    .map_err(|error| format!("skipped ({error})"))?;
     let detail = format!(
         "paste {} chars after layout {} (from {current})",
         plan.converted.chars().count(),
@@ -400,10 +418,10 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     // held: replaying under a held Shift/Ctrl would render uppercase text
     // (or app shortcuts). Fires on release, see `handle_key`.
     let mut pending: Option<PendingGesture> = None;
-    let detector = ManualOnly;
+    let detector = BigramDetector;
     let mut clipboard = clipboard::WlClipboard;
     eprintln!(
-        "detector: {} (manual-only, no auto conversion)",
+        "detector: {} (direction verdicts, no auto conversion)",
         detector.name()
     );
 
@@ -467,7 +485,7 @@ fn handle_control(
         buffer,
         converter,
         selection_converter,
-        detector: _,
+        detector,
         ipc,
         injector,
         clipboard,
@@ -490,7 +508,14 @@ fn handle_control(
     let answer = match request.kind {
         ControlKind::Word => {
             let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
-            match do_convert(&word, converter, &mut **ipc, &mut **injector) {
+            match do_convert(
+                &word,
+                buffer.phrase(),
+                *detector,
+                converter,
+                &mut **ipc,
+                &mut **injector,
+            ) {
                 Ok(detail) => {
                     // Bind conversions supersede a pending selection
                     // undo, same as the gesture path.
@@ -507,6 +532,7 @@ fn handle_control(
                 &mut **ipc,
                 &mut **injector,
                 &mut **clipboard,
+                *detector,
             ) {
                 Ok(detail) => format!("ok bind-selection: {detail}"),
                 Err(detail) => format!("err bind-selection: {detail}"),
@@ -518,11 +544,11 @@ fn handle_control(
 }
 
 /// Mutable daemon state threaded through key handling (keeps `handle_key`
-/// within the argument-count lint). The detector rides along so the future
-/// scorer slots into the gesture path without touching buffer, triggers, or
-/// injection (ADR-0006); `ManualOnly` always declines, so behavior is
-/// unchanged. `I`/`L`/`C` are the hardware seams (uinput, niri IPC,
-/// clipboard): production passes the real types, tests pass fakes.
+/// within the argument-count lint). The detector verdicts the conversion
+/// direction at the gesture decision point (ADR-0006): confident verdicts
+/// set the hop target, declines keep the `current_layout` behavior.
+/// `I`/`L`/`C` are the hardware seams (uinput, niri IPC, clipboard):
+/// production passes the real types, tests pass fakes.
 struct Daemon<'a, I: Emitter, L: LayoutBackend, C: Clipboard> {
     triggers: &'a mut TriggerMachine,
     buffer: &'a mut InputBuffer,
@@ -622,10 +648,8 @@ fn handle_key_at(
         *pending = Some(staged);
         return;
     }
-    // Detector seam (ADR-0006): the future scorer observes the buffer here,
-    // at the gesture decision point. ManualOnly always declines, so the
-    // result is intentionally unused and behavior stays manual-only.
-    let _auto_score = detector.score(buffer.phrase());
+    // Detector seam (ADR-0006): the verdict is consulted inside
+    // `do_convert` / `do_convert_selection`, which pick the hop target.
     match staged.kind {
         GestureKind::Word => {
             if staged.undo && converter.has_pending_undo() {
@@ -651,7 +675,14 @@ fn handle_key_at(
                 return;
             }
             let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
-            match do_convert(&word, converter, &mut **ipc, &mut **injector) {
+            match do_convert(
+                &word,
+                buffer.phrase(),
+                *detector,
+                converter,
+                &mut **ipc,
+                &mut **injector,
+            ) {
                 Ok(detail) => {
                     // A fresh word conversion supersedes a pending
                     // selection undo: "repeat" only undoes the
@@ -670,7 +701,14 @@ fn handle_key_at(
                 return;
             }
             let phrase = buffer.phrase().to_vec();
-            match do_convert(&phrase, converter, &mut **ipc, &mut **injector) {
+            match do_convert(
+                &phrase,
+                &phrase,
+                *detector,
+                converter,
+                &mut **ipc,
+                &mut **injector,
+            ) {
                 Ok(detail) => eprintln!("phrase: {detail}"),
                 Err(detail) => eprintln!("phrase: {detail}"),
             }
@@ -696,6 +734,7 @@ fn handle_key_at(
                 &mut **ipc,
                 &mut **injector,
                 &mut **clipboard,
+                *detector,
             ) {
                 Ok(detail) => eprintln!("convert selection: {detail}"),
                 Err(detail) => eprintln!("convert selection: {detail}"),
@@ -709,6 +748,7 @@ mod tests {
     use super::*;
     use crate::buffer::BufferEntry;
     use crate::config::LayoutPair;
+    use crate::detector::ManualOnly;
     use crate::trigger::{Bind, ModSet};
     use evdev::KeyCode;
     use std::io;
@@ -798,7 +838,7 @@ mod tests {
         buffer: InputBuffer,
         converter: Converter,
         selection_converter: SelectionConverter,
-        detector: ManualOnly,
+        detector: Box<dyn Detector>,
         ipc: FakeLayouts,
         injector: FakeEmitter,
         clipboard: FakeClipboard,
@@ -808,13 +848,17 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
+            Self::with_detector(Box::new(ManualOnly))
+        }
+
+        fn with_detector(detector: Box<dyn Detector>) -> Self {
             let pair = LayoutPair::new("us", "ru").unwrap();
             Self {
                 triggers: TriggerMachine::new(),
                 buffer: InputBuffer::default(),
                 converter: Converter::new(pair.clone()),
                 selection_converter: SelectionConverter::new(pair),
-                detector: ManualOnly,
+                detector,
                 ipc: FakeLayouts {
                     current: 0,
                     count: 2,
@@ -837,7 +881,7 @@ mod tests {
                 buffer: &mut self.buffer,
                 converter: &mut self.converter,
                 selection_converter: &mut self.selection_converter,
-                detector: &self.detector,
+                detector: self.detector.as_ref(),
                 ipc: &mut self.ipc,
                 injector: &mut self.injector,
                 clipboard: &mut self.clipboard,
@@ -857,6 +901,14 @@ mod tests {
 
         fn type_word(&mut self, start: u64) {
             for (i, code) in WORD.iter().enumerate() {
+                let t = start + (i as u64) * 20;
+                self.at(t, *code, 1);
+                self.at(t + 10, *code, 0);
+            }
+        }
+
+        fn type_codes(&mut self, start: u64, codes: &[u16]) {
+            for (i, code) in codes.iter().enumerate() {
                 let t = start + (i as u64) * 20;
                 self.at(t, *code, 1);
                 self.at(t + 10, *code, 0);
@@ -889,6 +941,72 @@ mod tests {
             WORD.to_vec()
         );
         assert!(h.converter.has_pending_undo());
+    }
+
+    /// `ghbdtn` in true keystroke order (g,h,b,d,t,n): Ru-confident for
+    /// the verdict tests. (WORD above is layout-agnostic replay order,
+    /// which scores differently — bigrams are order-sensitive.)
+    const GHBTDN: [u16; 6] = [34, 35, 48, 32, 20, 49];
+
+    #[test]
+    fn diverged_layout_confident_verdict_converts_toward_intended() {
+        // 18:55 scenario: typed in us, external switch to ru, trigger.
+        // The confident RU verdict converts toward ru instead of toggling
+        // back to us (today's ManualOnly behavior, asserted below).
+        let mut h = Harness::with_detector(Box::new(BigramDetector));
+        h.type_codes(T, &GHBTDN);
+        h.ipc.current = 1;
+        h.double_shift(T + 500);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.injector.erases, vec![6]);
+        assert_eq!(
+            h.injector.replays[0]
+                .iter()
+                .map(|e| e.scancode)
+                .collect::<Vec<_>>(),
+            GHBTDN.to_vec()
+        );
+
+        let mut today = Harness::new();
+        today.type_codes(T, &GHBTDN);
+        today.ipc.current = 1;
+        today.double_shift(T + 500);
+        assert_eq!(today.ipc.switches, vec![0]);
+    }
+
+    #[test]
+    fn diverged_layout_decline_matches_today_byte_identical() {
+        // "hi" declines (below the margin): the bigram path must erase,
+        // switch, and replay exactly what ManualOnly does today.
+        let mut bigram = Harness::with_detector(Box::new(BigramDetector));
+        let mut manual = Harness::new();
+        for h in [&mut bigram, &mut manual] {
+            h.type_codes(T, &[35, 23]); // h, i
+            h.ipc.current = 1;
+            h.double_shift(T + 500);
+        }
+        assert_eq!(bigram.ipc.switches, vec![0]);
+        assert_eq!(bigram.ipc.switches, manual.ipc.switches);
+        assert_eq!(bigram.injector.erases, manual.injector.erases);
+        assert_eq!(bigram.injector.replays, manual.injector.replays);
+    }
+
+    #[test]
+    fn diverged_layout_confident_selection_converts_toward_intended() {
+        // Clipboard holds us-typed "ghbdtn" while ru is current: the
+        // confident RU verdict maps EN->RU and hops to ru.
+        let mut h = Harness::with_detector(Box::new(BigramDetector));
+        h.ipc.current = 1;
+        h.at(T, CTRL, 1);
+        h.at(T + 50, SHIFT, 1);
+        h.at(T + 100, SHIFT, 0);
+        h.at(T + 200, SHIFT, 1);
+        h.at(T + 250, SHIFT, 0);
+        assert!(h.ipc.switches.is_empty());
+        h.at(T + 300, CTRL, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
+        assert_eq!(h.injector.pastes, 1);
     }
 
     #[test]
@@ -953,7 +1071,7 @@ mod tests {
                 buffer: &mut h.buffer,
                 converter: &mut h.converter,
                 selection_converter: &mut h.selection_converter,
-                detector: &h.detector,
+                detector: h.detector.as_ref(),
                 ipc: &mut h.ipc,
                 injector: &mut h.injector,
                 clipboard: &mut h.clipboard,

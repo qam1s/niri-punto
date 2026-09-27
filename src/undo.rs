@@ -57,6 +57,27 @@ impl LayoutCtx<'_> {
             target: 1 - self.current,
         })
     }
+
+    /// The hop to an explicit pair position, for confident detector
+    /// verdicts: the target is the intended layout, ignoring which layout
+    /// is current (an external switch between typing and triggering must
+    /// not divert the conversion). The pair guard still applies — a third
+    /// language or a single-layout setup is refused exactly as in
+    /// [`LayoutCtx::hop`].
+    pub fn hop_toward(&self, target: u8) -> Result<LayoutHop, ConversionError> {
+        debug_assert!(target <= 1, "verdict targets a pair position");
+        if self.current > 1 || self.count < 2 || target > 1 {
+            return Err(ConversionError::Layouts {
+                current: self.current,
+                count: self.count,
+                pair: self.pair.clone(),
+            });
+        }
+        Ok(LayoutHop {
+            from: self.current,
+            target,
+        })
+    }
 }
 
 /// A plan step that knows its own reverse: undo replays the same content
@@ -165,6 +186,38 @@ mod tests {
         );
         assert_eq!(
             ctx(&pair, 0, 1).hop(),
+            Err(ConversionError::Layouts {
+                current: 0,
+                count: 1,
+                pair: pair.clone(),
+            })
+        );
+    }
+
+    #[test]
+    fn hop_toward_ignores_current_but_keeps_the_pair_guard() {
+        let pair = pair();
+        // Confident verdict: target is the intended layout even when it
+        // equals the diverged current layout (18:55 scenario).
+        assert_eq!(
+            ctx(&pair, 1, 2).hop_toward(1).unwrap(),
+            LayoutHop { from: 1, target: 1 }
+        );
+        assert_eq!(
+            ctx(&pair, 0, 2).hop_toward(1).unwrap(),
+            LayoutHop { from: 0, target: 1 }
+        );
+        // The guard refuses exactly like hop().
+        assert_eq!(
+            ctx(&pair, 2, 3).hop_toward(1),
+            Err(ConversionError::Layouts {
+                current: 2,
+                count: 3,
+                pair: pair.clone(),
+            })
+        );
+        assert_eq!(
+            ctx(&pair, 0, 1).hop_toward(1),
             Err(ConversionError::Layouts {
                 current: 0,
                 count: 1,

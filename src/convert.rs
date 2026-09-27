@@ -101,6 +101,25 @@ pub fn plan_conversion(
     })
 }
 
+/// Plan a conversion toward an explicit pair position: the target is a
+/// confident detector verdict's intended layout, ignoring which layout is
+/// current. The empty-word and pair-guard refusals match
+/// [`plan_conversion`] exactly, so a decline falls back byte-identical.
+pub fn plan_conversion_toward(
+    entries: &[BufferEntry],
+    target: u8,
+    ctx: LayoutCtx<'_>,
+) -> Result<ConversionPlan, ConversionError> {
+    if entries.is_empty() {
+        return Err(ConversionError::Empty);
+    }
+    Ok(ConversionPlan {
+        erase: entries.len(),
+        hop: ctx.hop_toward(target)?,
+        replay: entries.to_vec(),
+    })
+}
+
 /// Tracks the convert/undo chain across gestures: a thin wrapper over the
 /// shared [`UndoChain`] remembering the configured pair for planning.
 pub struct Converter {
@@ -125,6 +144,28 @@ impl Converter {
     ) -> Result<ConversionPlan, ConversionError> {
         let plan = plan_conversion(
             entries,
+            LayoutCtx {
+                current,
+                count: layout_count,
+                pair: &self.pair,
+            },
+        )?;
+        self.chain.remember(plan.clone());
+        Ok(plan)
+    }
+
+    /// Plan a fresh conversion toward an explicit pair position (a
+    /// confident detector verdict's intended layout) and remember it.
+    pub fn convert_toward(
+        &mut self,
+        entries: &[BufferEntry],
+        target: u8,
+        current: u8,
+        layout_count: usize,
+    ) -> Result<ConversionPlan, ConversionError> {
+        let plan = plan_conversion_toward(
+            entries,
+            target,
             LayoutCtx {
                 current,
                 count: layout_count,
@@ -207,6 +248,24 @@ mod tests {
         let plan = plan_conversion(&phrase, ctx(&pair(), 0, 2)).unwrap();
         assert_eq!(plan.erase, 4);
         assert_eq!(plan.replay, phrase);
+    }
+
+    #[test]
+    fn toward_ignores_current_but_refuses_like_today() {
+        // Diverged current layout (18:55): the target still lands on the
+        // intended position, from the diverged current for a correct undo.
+        let plan = plan_conversion_toward(&word(), 1, ctx(&pair(), 1, 2)).unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 1));
+        assert_eq!(plan.erase, 6);
+        // Refusals match plan_conversion exactly.
+        assert_eq!(
+            plan_conversion_toward(&[], 1, ctx(&pair(), 0, 2)),
+            Err(ConversionError::Empty)
+        );
+        assert_eq!(
+            plan_conversion_toward(&word(), 1, ctx(&pair(), 2, 3)),
+            plan_conversion(&word(), ctx(&pair(), 2, 3))
+        );
     }
 
     #[test]
