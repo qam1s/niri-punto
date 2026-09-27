@@ -39,7 +39,7 @@ No compiler, no AUR helper needed.
 Prefer key binds? Add to your niri config:
 
 ```kdl
-Mod+Shift+L { spawn "niri-punto" "convert-word"; }
+Mod+L { spawn "niri-punto" "convert-word"; }
 ```
 
 Layouts are configured as an ordered pair in `config.kdl`; `niri-punto doctor`

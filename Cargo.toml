@@ -6,3 +6,8 @@ rust-version = "1.87"
 license = "GPL-3.0-or-later"
 description = "Punto Switcher for the niri Wayland compositor"
 repository = "https://github.com/qam1s/niri-punto"
+
+[dependencies]
+evdev = "0.13"
+kdl = "6"
+niri-ipc = "26.4.0"

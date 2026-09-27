@@ -1,0 +1,30 @@
+name: build
+on:
+  push:
+    tags: ["v*.*.*"]
+    branches: ["main", "feat/**"]
+  pull_request:
+permissions:
+  contents: write # needed by action-gh-release on tags
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo test --locked
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo fmt --check
+      - run: cargo build --release --target x86_64-unknown-linux-gnu
+      - if: github.ref_type == 'tag'
+        run: tar czf niri-punto-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz -C target/x86_64-unknown-linux-gnu/release niri-punto -C ${{ github.workspace }} README.md LICENSE contrib
+      - if: github.ref_type == 'tag'
+        run: sha256sum niri-punto-*.tar.gz > niri-punto-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz.sha256
+      - uses: softprops/action-gh-release@v3
+        if: github.ref_type == 'tag'
+        with:
+          files: |
+            *.tar.gz
+            *.tar.gz.sha256
