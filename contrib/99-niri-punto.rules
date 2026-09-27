@@ -1,6 +1,11 @@
 # niri-punto: grant the active session user read access to input devices.
 # Installed by `niri-punto setup` (escalated step) or by hand:
 #   sudo install -m 644 contrib/99-niri-punto.rules /etc/udev/rules.d/
-#   sudo udevadm control --reload-rules && sudo udevadm trigger
+#   sudo udevadm control --reload-rules && sudo udevadm trigger --action=add --subsystem-match=input
 # uaccess drops with the session: no `input` group, no relogin.
+# The uinput line is what lets the daemon open /dev/uinput (root-only by
+# default, tagged by no stock rule); without it the service exits on start.
+# Add events (not change) are what make logind write the ACLs onto
+# already-present devices.
 KERNEL=="event*", SUBSYSTEM=="input", TAG+="uaccess"
+KERNEL=="uinput", TAG+="uaccess"
