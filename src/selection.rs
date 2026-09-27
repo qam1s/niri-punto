@@ -110,7 +110,10 @@ impl SelectionConverter {
     }
 
     /// Plan a fresh conversion toward a confident verdict's intended
-    /// layout and remember it for a later undo.
+    /// layout and remember it for a later undo. Clipboard text carries no
+    /// birth layout (unlike buffer fills), so an agreeing verdict always
+    /// trusts the verdict — the selected text was highlighted at trigger
+    /// time, not typed under a tracked layout.
     pub fn convert_toward(
         &mut self,
         text: &str,

@@ -127,13 +127,15 @@ fn wait_for_barrier(ipc: &mut impl LayoutBackend, target: u8) -> bool {
 /// Fresh conversion of `entries`, shared by gestures and bind requests.
 /// `phrase` is the whole buffer: the detector verdicts its scope, so an
 /// external layout switch between typing and triggering cannot divert the
-/// hop target. A confident verdict converts toward the intended layout
-/// (ignoring which layout is current); a decline keeps today's
-/// `current_layout` behavior. Returns the one-line detail for daemon logs
-/// and socket replies.
+/// hop target. A confident verdict converts toward the intended layout,
+/// except when the layout has not moved since typing and the verdict
+/// agrees with it (see [`Converter::convert_toward`]); a decline keeps
+/// today's `current_layout` behavior. Returns the one-line detail for
+/// daemon logs and socket replies.
 fn do_convert(
     entries: &[BufferEntry],
     phrase: &[BufferEntry],
+    birth: Option<u8>,
     detector: &dyn Detector,
     converter: &mut Converter,
     ipc: &mut impl LayoutBackend,
@@ -143,7 +145,9 @@ fn do_convert(
         .current_layout()
         .map_err(|error| format!("layout read failed: {error}"))?;
     let plan = match detector.verdict(phrase) {
-        Verdict::Intended(intended) => converter.convert_toward(entries, intended, current, count),
+        Verdict::Intended(intended) => {
+            converter.convert_toward(entries, intended, current, count, birth)
+        }
         Verdict::Decline => converter.convert(entries, current, count),
     }
     .map_err(|error| format!("skipped ({error})"))?;
@@ -534,6 +538,7 @@ fn handle_control(
             match do_convert(
                 &word,
                 buffer.phrase(),
+                buffer.birth_layout(),
                 *detector,
                 converter,
                 &mut **ipc,
@@ -662,6 +667,14 @@ fn handle_key_at(
         converter.invalidate();
         selection_converter.invalidate();
         *pending = None;
+        // Anchor the fill to the layout it is typed under (one IPC query
+        // per fill): a confident verdict only overrides the current layout
+        // when the layout moved since typing (external switch).
+        if buffer.birth_layout().is_none() {
+            if let Ok((current, _)) = ipc.current_layout() {
+                buffer.note_birth(current);
+            }
+        }
         if raw.value == 1 {
             if reader::is_reset(raw.scancode) {
                 buffer.clear();
@@ -734,6 +747,7 @@ fn handle_key_at(
             match do_convert(
                 &word,
                 buffer.phrase(),
+                buffer.birth_layout(),
                 *detector,
                 converter,
                 &mut **ipc,
@@ -760,6 +774,7 @@ fn handle_key_at(
             match do_convert(
                 &phrase,
                 &phrase,
+                buffer.birth_layout(),
                 *detector,
                 converter,
                 &mut **ipc,
@@ -1144,6 +1159,20 @@ mod tests {
         today.ipc.current = 1;
         today.double_shift(T + 500);
         assert_eq!(today.ipc.switches, vec![0]);
+    }
+
+    #[test]
+    fn unchanged_layout_agreeing_verdict_flips_for_convert_away() {
+        // Typed under ru, still ru, RU verdict for `ghbdtn` keystrokes: no
+        // external switch happened, so the user converts away — mechanical
+        // flip to us instead of a no-op hop and no-op undos.
+        let mut h = Harness::with_detector(Box::new(BigramDetector));
+        h.ipc.current = 1;
+        h.type_codes(T, &GHBTDN);
+        h.at(T + 500, SUPER, 1);
+        h.at(T + 600, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![0]);
+        assert_eq!(h.injector.erases, vec![6]);
     }
 
     #[test]

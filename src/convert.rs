@@ -157,17 +157,26 @@ impl Converter {
 
     /// Plan a fresh conversion toward a confident detector verdict's
     /// intended layout (resolved to a pair position through the pair order)
-    /// and remember it.
+    /// and remember it. When the layout has not moved since typing
+    /// (`birth` equals `current`) and the verdict agrees with it, there
+    /// was no external switch: the text already matches the layout and
+    /// the user is converting away, so fall back to the mechanical flip.
+    /// A moved layout (or an unknown birth) trusts the verdict.
     pub fn convert_toward(
         &mut self,
         entries: &[BufferEntry],
         intended: Intended,
         current: u8,
         layout_count: usize,
+        birth: Option<u8>,
     ) -> Result<ConversionPlan, ConversionError> {
+        let target = intended.index_in(&self.pair);
+        if birth.is_some_and(|b| b == current) && target == current {
+            return self.convert(entries, current, layout_count);
+        }
         let plan = plan_conversion_toward(
             entries,
-            intended.index_in(&self.pair),
+            target,
             LayoutCtx {
                 current,
                 count: layout_count,
@@ -271,6 +280,42 @@ mod tests {
     }
 
     #[test]
+    fn toward_agreeing_verdict_flips_when_layout_unchanged() {
+        // Typed under ru, still ru, RU verdict: no external switch, so the
+        // text already matches the layout and the user converts away —
+        // mechanical flip, like the pre-detector behavior.
+        use crate::scorer::Intended;
+        let mut converter = Converter::new(pair());
+        let plan = converter
+            .convert_toward(&word(), Intended::Ru, 1, 2, Some(1))
+            .unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
+    }
+
+    #[test]
+    fn toward_agreeing_verdict_holds_when_layout_changed() {
+        // 18:55 scenario: typed under us, external switch to ru — the
+        // agreeing verdict sets the target, fixing the screen text.
+        use crate::scorer::Intended;
+        let mut converter = Converter::new(pair());
+        let plan = converter
+            .convert_toward(&word(), Intended::Ru, 1, 2, Some(0))
+            .unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (1, 1));
+    }
+
+    #[test]
+    fn toward_disagreeing_verdict_holds_when_unchanged() {
+        // Typed under us, still us, RU verdict: the normal EN->RU case.
+        use crate::scorer::Intended;
+        let mut converter = Converter::new(pair());
+        let plan = converter
+            .convert_toward(&word(), Intended::Ru, 0, 2, Some(0))
+            .unwrap();
+        assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
+    }
+
+    #[test]
     fn toward_resolves_the_intended_layout_through_a_swapped_pair() {
         use crate::scorer::Intended;
         let swapped = LayoutPair::new("ru", "us").unwrap();
@@ -278,12 +323,12 @@ mod tests {
         // the diverged current for a correct undo.
         let mut converter = Converter::new(swapped);
         let plan = converter
-            .convert_toward(&word(), Intended::Ru, 1, 2)
+            .convert_toward(&word(), Intended::Ru, 1, 2, None)
             .unwrap();
         assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
         assert_eq!(plan.erase, 6);
         let plan = converter
-            .convert_toward(&word(), Intended::Us, 0, 2)
+            .convert_toward(&word(), Intended::Us, 0, 2, None)
             .unwrap();
         assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
     }
