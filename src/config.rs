@@ -23,11 +23,11 @@ pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pai
 // config. `setup` never overwrites this file once created.
 layout "us" "ru"
 // Daemon-side binds in niri style: no niri binds needed. A bare `Mod`
-// is the lone-tap scope (`off` disables the tap); the rest are
-// modifiers-held-plus-key, mirroring the gesture table in README.
+// is the lone-tap scope (`off` disables the tap); hand-added combos are
+// modifiers-held-plus-key. Phrase needs no bind: Mod+Shift (Mod first)
+// converts on Mod release (mirroring the gesture table in README).
 binds {
     Mod word
-    Mod+L phrase
     Double-Shift selection
 }
 // Trigger timings in milliseconds: absent keys mean these defaults.
@@ -735,23 +735,21 @@ mod tests {
     fn default_config_settings_parse() {
         let settings = parse_settings(DEFAULT_CONFIG).unwrap();
         assert_eq!(settings.tap_action, Some(GestureKind::Word));
-        assert_eq!(settings.binds.len(), 1);
-        assert_eq!(settings.binds[0].kind, GestureKind::Phrase);
-        assert!(settings.binds[0].mods.meta);
+        assert!(settings.binds.is_empty());
         assert_eq!(settings.pair_base, GestureKind::Selection);
     }
 
     #[test]
     fn readme_example_parses_to_readme_mapping() {
         // Mirror of the Config example in README.md: word on Mod tap,
-        // phrase on Mod+L, selection on Double Shift.
+        // selection on Double Shift, no Mod combos (phrase is the
+        // both-Shifts pair, not a bind).
         let settings = parse_settings(
-            "layout \"us\" \"ru\"\nbinds {\n Mod word\n Mod+L phrase\n double-shift selection\n}\ntimings {\n double-shift-ms 400\n undo-ms 3000\n debounce-ms 30\n pending-ms 2000\n tap-ms 300\n}\n",
+            "layout \"us\" \"ru\"\nbinds {\n Mod word\n double-shift selection\n}\ntimings {\n double-shift-ms 400\n undo-ms 3000\n debounce-ms 30\n pending-ms 2000\n tap-ms 300\n}\n",
         )
         .unwrap();
         assert_eq!(settings.tap_action, Some(GestureKind::Word));
-        assert_eq!(settings.binds.len(), 1);
-        assert_eq!(settings.binds[0].kind, GestureKind::Phrase);
+        assert!(settings.binds.is_empty());
         assert_eq!(settings.pair_base, GestureKind::Selection);
         assert_eq!(settings.timing, TimingConfig::default());
     }

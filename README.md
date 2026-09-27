@@ -45,7 +45,7 @@ niri-punto setup
 | Gesture        | Action    | Description                              |
 | -------------- | --------- | ---------------------------------------- |
 | Mod            | word      | Convert word or switch layout when empty |
-| Mod + L        | phrase    | Convert phrase                           |
+| Mod + Shift    | phrase    | Hold Mod, press Shift, release both      |
 | Double Shift   | selection | Convert selection                        |
 | Repeat gesture | undo      | Undo previous conversion                 |
 
@@ -60,7 +60,6 @@ layout "us" "ru"
 
 binds {
     Mod word
-    Mod+L phrase
     Double-Shift selection
 }
 
