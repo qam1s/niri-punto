@@ -24,12 +24,11 @@ pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pai
 layout "us" "ru"
 // Daemon-side binds in niri style: no niri binds needed. A bare `Mod`
 // is the lone-tap scope (`off` disables the tap); the rest are
-// modifiers-held-plus-key, one per scope from the table in README.
+// modifiers-held-plus-key, mirroring the gesture table in README.
 binds {
     Mod word
-    Mod+L word
-    Mod+P phrase
-    Mod+S selection
+    Mod+L phrase
+    double-shift selection
 }
 // Trigger timings in milliseconds: absent keys mean these defaults.
 timings {
@@ -694,11 +693,25 @@ mod tests {
     fn default_config_settings_parse() {
         let settings = parse_settings(DEFAULT_CONFIG).unwrap();
         assert_eq!(settings.tap_action, Some(GestureKind::Word));
-        assert_eq!(settings.binds.len(), 3);
-        assert_eq!(settings.binds[0].kind, GestureKind::Word);
-        assert_eq!(settings.binds[1].kind, GestureKind::Phrase);
-        assert_eq!(settings.binds[2].kind, GestureKind::Selection);
-        assert!(settings.binds.iter().all(|bind| bind.mods.meta));
+        assert_eq!(settings.binds.len(), 1);
+        assert_eq!(settings.binds[0].kind, GestureKind::Phrase);
+        assert!(settings.binds[0].mods.meta);
+        assert_eq!(settings.pair_base, GestureKind::Selection);
+    }
+
+    #[test]
+    fn readme_example_parses_to_readme_mapping() {
+        // Mirror of the Config example in README.md: word on Mod tap,
+        // phrase on Mod+L, selection on Double Shift.
+        let settings = parse_settings(
+            "layout \"us\" \"ru\"\nbinds {\n Mod word\n Mod+L phrase\n double-shift selection\n}\ntimings {\n double-shift-ms 400\n undo-ms 3000\n debounce-ms 30\n pending-ms 2000\n tap-ms 300\n}\n",
+        )
+        .unwrap();
+        assert_eq!(settings.tap_action, Some(GestureKind::Word));
+        assert_eq!(settings.binds.len(), 1);
+        assert_eq!(settings.binds[0].kind, GestureKind::Phrase);
+        assert_eq!(settings.pair_base, GestureKind::Selection);
+        assert_eq!(settings.timing, TimingConfig::default());
     }
 
     #[test]
