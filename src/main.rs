@@ -94,8 +94,17 @@ fn apply_plan(
 
 /// Wait for the layout barrier, recovering a dead event stream with
 /// backoff first (compositor restarts must not kill conversions).
+/// When the target is already active the barrier passes without touching
+/// the stream: niri emits no event for staying put, so waiting would wedge
+/// the daemon mid-conversion with the user's text already erased (a later
+/// layout switch would then fire the stale plan over current field text).
 /// Returns true when the barrier is satisfied; every failure is logged.
 fn wait_for_barrier(ipc: &mut impl LayoutBackend, target: u8) -> bool {
+    if let Ok((current, _)) = ipc.current_layout() {
+        if current == target {
+            return true;
+        }
+    }
     match ipc.wait_for_layout(target) {
         Ok(()) => true,
         Err(error) => {
@@ -782,6 +791,8 @@ mod tests {
         current: u8,
         count: usize,
         switches: Vec<u8>,
+        wait_calls: usize,
+        stream_dead: bool,
     }
 
     impl LayoutBackend for FakeLayouts {
@@ -796,10 +807,17 @@ mod tests {
         }
 
         fn wait_for_layout(&mut self, _target: u8) -> io::Result<()> {
+            self.wait_calls += 1;
+            if self.stream_dead {
+                return Err(io::Error::other("stream dead"));
+            }
             Ok(())
         }
 
         fn recover_barrier(&mut self, target: u8) -> io::Result<bool> {
+            if self.stream_dead {
+                return Err(io::Error::other("stream dead"));
+            }
             Ok(self.current == target)
         }
     }
@@ -865,6 +883,8 @@ mod tests {
                     current: 0,
                     count: 2,
                     switches: Vec::new(),
+                    wait_calls: 0,
+                    stream_dead: false,
                 },
                 injector: FakeEmitter::default(),
                 clipboard: FakeClipboard {
@@ -925,6 +945,25 @@ mod tests {
             self.at(t + 150, SHIFT, 1);
             self.at(t + 200, SHIFT, 0);
         }
+    }
+
+    #[test]
+    fn barrier_already_at_target_skips_the_event_stream() {
+        // No-op hop (a confident verdict agreeing with the current
+        // layout): niri emits no event for staying put, so waiting would
+        // wedge the daemon mid-conversion with the user's text erased.
+        // The stream is poisoned here: any touch fails, recovery included.
+        let mut h = Harness::new();
+        h.ipc.stream_dead = true;
+        assert!(wait_for_barrier(&mut h.ipc, 0));
+        assert_eq!(h.ipc.wait_calls, 0);
+    }
+
+    #[test]
+    fn barrier_real_switch_still_waits_on_the_stream() {
+        let mut h = Harness::new();
+        assert!(wait_for_barrier(&mut h.ipc, 1));
+        assert_eq!(h.ipc.wait_calls, 1);
     }
 
     #[test]
