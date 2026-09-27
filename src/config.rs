@@ -12,7 +12,7 @@
 //! environment.
 
 use crate::reader;
-use crate::trigger::{Bind, GestureKind, ModSet, TapMode, TimingConfig};
+use crate::trigger::{Bind, GestureKind, ModSet, TimingConfig};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -22,11 +22,11 @@ pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pai
 // layout index, so the order must match the `layout` line in your niri
 // config. `setup` never overwrites this file once created.
 layouts "us" "ru"
-// Lone Mod tap trigger: "meta" converts on tap, "off" disables it.
-tap "meta"
-// Daemon-side binds in niri style: no niri binds needed. One per scope,
-// mirroring the gesture table in README.
+// Daemon-side binds in niri style: no niri binds needed. A bare `Mod`
+// is the lone-tap scope (`off` disables the tap); the rest are
+// modifiers-held-plus-key, one per scope from the table in README.
 binds {
+    Mod word
     Mod+L word
     Mod+P phrase
     Mod+S selection
@@ -97,10 +97,12 @@ pub enum ConfigError {
     EmptyCode,
     /// Both codes are identical.
     Duplicate(String),
-    /// The `tap` node is repeated or holds a bad value.
+    /// The `tap` node was replaced by a bare-`Mod` bind.
     BadTap(String),
     /// A `binds` entry is malformed (combo or action).
     BadBind(String),
+    /// The `double-shift` node holds a bad action.
+    BadDoubleShift(String),
     /// The `timings` block is malformed (keys or values).
     BadTimings(String),
     /// File I/O failed (missing file, permissions).
@@ -123,6 +125,7 @@ impl fmt::Display for ConfigError {
             Self::Duplicate(code) => write!(f, "layout codes must differ, both are \"{code}\""),
             Self::BadTap(message) => write!(f, "bad `tap` node: {message}"),
             Self::BadBind(message) => write!(f, "bad bind: {message}"),
+            Self::BadDoubleShift(message) => write!(f, "bad `double-shift` node: {message}"),
             Self::BadTimings(message) => write!(f, "bad `timings` block: {message}"),
             Self::Io(message) => write!(f, "{message}"),
         }
@@ -175,14 +178,27 @@ pub fn parse(text: &str) -> Result<LayoutPair, ConfigError> {
     LayoutPair::new(codes[0], codes[1])
 }
 
-/// Trigger settings from the optional `tap` node and repeatable `chord`
-/// nodes. Missing nodes mean defaults (tap on, no chords), so config files
-/// written before these nodes existed keep working.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+/// Trigger settings from the `binds` block, the optional `double-shift`
+/// node, and the `timings` block. Missing nodes mean defaults (tap on as
+/// word, plain pair as word, no binds), so old config files keep working.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TriggerSettings {
-    pub tap: TapMode,
+    /// Lone-Mod-tap scope from a bare-`Mod` bind; `None` disables the tap.
+    pub tap_action: Option<GestureKind>,
     pub binds: Vec<Bind>,
+    pub pair_base: GestureKind,
     pub timing: TimingConfig,
+}
+
+impl Default for TriggerSettings {
+    fn default() -> Self {
+        Self {
+            tap_action: Some(GestureKind::Word),
+            binds: Vec::new(),
+            pair_base: GestureKind::Word,
+            timing: TimingConfig::default(),
+        }
+    }
 }
 
 /// Parse trigger settings. Unknown nodes are ignored, like in [`parse`].
@@ -191,19 +207,15 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
         .parse()
         .map_err(|error: kdl::KdlError| ConfigError::Parse(error.to_string()))?;
     let mut settings = TriggerSettings::default();
-    let mut tap_seen = false;
     let mut timings_seen = false;
     let mut binds_seen = false;
+    let mut pair_seen = false;
     for node in document.nodes() {
         match node.name().value() {
             "tap" => {
-                if tap_seen {
-                    return Err(ConfigError::BadTap(
-                        "more than one `tap` node: keep exactly one".to_string(),
-                    ));
-                }
-                tap_seen = true;
-                settings.tap = parse_tap(node)?;
+                return Err(ConfigError::BadTap(
+                    "`tap` is now a bare-`Mod` bind (e.g. `binds { Mod word }`); no bare bind means tap off".to_string(),
+                ));
             }
             "binds" => {
                 if binds_seen {
@@ -212,7 +224,7 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
                     ));
                 }
                 binds_seen = true;
-                settings.binds = parse_binds(node)?;
+                parse_binds(node, &mut settings)?;
             }
             // `chord` lines died in favor of the `binds` block: fail loudly
             // instead of silently dropping the user's triggers.
@@ -220,6 +232,15 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
                 return Err(ConfigError::BadBind(
                     "`chord` lines were replaced by the `binds` block (e.g. `binds { Mod+L word }`)".to_string(),
                 ));
+            }
+            "double-shift" => {
+                if pair_seen {
+                    return Err(ConfigError::BadDoubleShift(
+                        "more than one `double-shift` node: keep exactly one".to_string(),
+                    ));
+                }
+                pair_seen = true;
+                settings.pair_base = parse_double_shift(node)?;
             }
             "timings" => {
                 if timings_seen {
@@ -250,39 +271,75 @@ fn node_args(node: &kdl::KdlNode) -> Option<Vec<&str>> {
     Some(args)
 }
 
-fn parse_tap(node: &kdl::KdlNode) -> Result<TapMode, ConfigError> {
+fn parse_double_shift(node: &kdl::KdlNode) -> Result<GestureKind, ConfigError> {
     match node_args(node).as_deref() {
-        Some(["meta"]) => Ok(TapMode::Meta),
-        Some(["off"]) => Ok(TapMode::Off),
-        _ => Err(ConfigError::BadTap(
-            "want exactly one of `meta`, `off` (e.g. `tap \"meta\"`)".to_string(),
+        Some([action]) => parse_action(action).map_err(|message| {
+            ConfigError::BadDoubleShift(format!("{message} (e.g. `double-shift selection`)"))
+        }),
+        _ => Err(ConfigError::BadDoubleShift(
+            "want exactly one action (e.g. `double-shift selection`)".to_string(),
         )),
     }
 }
 
-fn parse_binds(node: &kdl::KdlNode) -> Result<Vec<Bind>, ConfigError> {
+fn parse_action(action: &str) -> Result<GestureKind, String> {
+    match action {
+        "word" => Ok(GestureKind::Word),
+        "phrase" => Ok(GestureKind::Phrase),
+        "selection" => Ok(GestureKind::Selection),
+        _ => Err(format!(
+            "bad action {action:?}: want `word`, `phrase`, or `selection`"
+        )),
+    }
+}
+
+fn parse_binds(node: &kdl::KdlNode, settings: &mut TriggerSettings) -> Result<(), ConfigError> {
     if !node.entries().is_empty() {
         return Err(ConfigError::BadBind(
             "the block takes no arguments, only `Combo action` lines".to_string(),
         ));
     }
-    let mut binds = Vec::new();
+    let mut tap_seen = false;
     if let Some(children) = node.children() {
         for child in children.nodes() {
-            binds.push(parse_bind(child)?);
+            match parse_bind(child)? {
+                BindLine::Bind(bind) => settings.binds.push(bind),
+                BindLine::Binds(first, second) => {
+                    settings.binds.push(first);
+                    settings.binds.push(second);
+                }
+                BindLine::Tap(kind) => {
+                    if tap_seen {
+                        return Err(ConfigError::BadBind(
+                            "more than one tap bind: keep exactly one bare `Mod` line".to_string(),
+                        ));
+                    }
+                    tap_seen = true;
+                    settings.tap_action = kind;
+                }
+            }
         }
     }
-    Ok(binds)
+    Ok(())
+}
+
+/// One parsed `binds` line: a single bind, a modifier-key pair, or the tap.
+enum BindLine {
+    Bind(Bind),
+    Binds(Bind, Bind),
+    Tap(Option<GestureKind>),
 }
 
 /// One bind: the node name is the niri-style combo (`Mod+L`,
-/// `Mod+Shift+P`), the single argument is the action.
-fn parse_bind(node: &kdl::KdlNode) -> Result<Bind, ConfigError> {
+/// `Mod+Shift+P`), the single argument is the action. A bare `Mod` is
+/// the lone-tap scope (`off` disables the tap); a modifier as the key
+/// (`Mod+Shift`) expands to both side scancodes.
+fn parse_bind(node: &kdl::KdlNode) -> Result<BindLine, ConfigError> {
     let action = match node_args(node).as_deref() {
         Some([action]) => *action,
         _ => {
             return Err(ConfigError::BadBind(format!(
-                "{:?} wants exactly one action (`word`, `phrase`, or `selection`)",
+                "{:?} wants exactly one action (`word`, `phrase`, `selection`, or `off` for tap)",
                 node.name().value()
             )));
         }
@@ -292,6 +349,20 @@ fn parse_bind(node: &kdl::KdlNode) -> Result<Bind, ConfigError> {
     let Some(key) = parts.pop() else {
         return Err(ConfigError::BadBind(format!("bad combo {combo:?}")));
     };
+    if parts.is_empty() {
+        // Bare key name: only a lone Mod is a tap.
+        if !key.eq_ignore_ascii_case("mod") {
+            return Err(ConfigError::BadBind(format!(
+                "bad combo {combo:?}: need at least one modifier (e.g. `Mod+L`), or lone `Mod` for tap"
+            )));
+        }
+        if action == "off" {
+            return Ok(BindLine::Tap(None));
+        }
+        let kind = parse_action(action).map_err(ConfigError::BadBind)?;
+        return Ok(BindLine::Tap(Some(kind)));
+    }
+    let kind = parse_action(action).map_err(ConfigError::BadBind)?;
     let mut mods = ModSet::default();
     for part in &parts {
         match part.to_lowercase().as_str() {
@@ -315,26 +386,30 @@ fn parse_bind(node: &kdl::KdlNode) -> Result<Bind, ConfigError> {
             "bad combo {combo:?}: need at least one modifier (e.g. `Mod+L`)"
         )));
     }
+    if let Some((left, right)) = reader::modifier_scancodes(&key.to_lowercase()) {
+        return Ok(BindLine::Binds(
+            Bind {
+                mods,
+                scancode: left,
+                kind,
+            },
+            Bind {
+                mods,
+                scancode: right,
+                kind,
+            },
+        ));
+    }
     let Some(scancode) = reader::scancode_by_name(&key.to_lowercase()) else {
         return Err(ConfigError::BadBind(format!(
-            "unknown key {key:?} in {combo:?}: want a letter or digit"
+            "unknown key {key:?} in {combo:?}: want a letter, digit, or modifier"
         )));
     };
-    let kind = match action {
-        "word" => GestureKind::Word,
-        "phrase" => GestureKind::Phrase,
-        "selection" => GestureKind::Selection,
-        _ => {
-            return Err(ConfigError::BadBind(format!(
-                "bad action {action:?}: want `word`, `phrase`, or `selection`"
-            )));
-        }
-    };
-    Ok(Bind {
+    Ok(BindLine::Bind(Bind {
         mods,
         scancode,
         kind,
-    })
+    }))
 }
 
 /// Exactly one positional integer argument, no properties.
@@ -465,6 +540,7 @@ fn with_path(path: &Path, error: ConfigError) -> ConfigError {
         | ConfigError::Duplicate(_)
         | ConfigError::BadTap(_)
         | ConfigError::BadBind(_)
+        | ConfigError::BadDoubleShift(_)
         | ConfigError::BadTimings(_) => ConfigError::Io(format!("{}: {error}", path.display())),
         ConfigError::Io(_) => error,
     }
@@ -582,16 +658,17 @@ mod tests {
     }
 
     #[test]
-    fn settings_default_to_tap_on_without_binds() {
+    fn settings_default_to_tap_word_without_binds() {
         let settings = parse_settings("layouts \"us\" \"ru\"\n").unwrap();
-        assert_eq!(settings.tap, TapMode::Meta);
+        assert_eq!(settings.tap_action, Some(GestureKind::Word));
         assert!(settings.binds.is_empty());
+        assert_eq!(settings.pair_base, GestureKind::Word);
     }
 
     #[test]
     fn default_config_settings_parse() {
         let settings = parse_settings(DEFAULT_CONFIG).unwrap();
-        assert_eq!(settings.tap, TapMode::Meta);
+        assert_eq!(settings.tap_action, Some(GestureKind::Word));
         assert_eq!(settings.binds.len(), 3);
         assert_eq!(settings.binds[0].kind, GestureKind::Word);
         assert_eq!(settings.binds[1].kind, GestureKind::Phrase);
@@ -600,17 +677,65 @@ mod tests {
     }
 
     #[test]
-    fn tap_off_parses() {
-        let settings = parse_settings("layouts \"us\" \"ru\"\ntap \"off\"\n").unwrap();
-        assert_eq!(settings.tap, TapMode::Off);
+    fn bare_mod_sets_tap_action() {
+        let settings =
+            parse_settings("layouts \"us\" \"ru\"\nbinds {\n Mod selection\n}\n").unwrap();
+        assert_eq!(settings.tap_action, Some(GestureKind::Selection));
+        assert!(settings.binds.is_empty());
     }
 
     #[test]
-    fn tap_rejects_bad_values() {
-        assert!(parse_settings("layouts \"us\" \"ru\"\ntap \"alt\"\n").is_err());
-        assert!(parse_settings("layouts \"us\" \"ru\"\ntap\n").is_err());
-        assert!(parse_settings("layouts \"us\" \"ru\"\ntap \"meta\" \"off\"\n").is_err());
-        assert!(parse_settings("layouts \"us\" \"ru\"\ntap \"meta\"\ntap \"off\"\n").is_err());
+    fn bare_mod_off_disables_tap() {
+        let settings = parse_settings("layouts \"us\" \"ru\"\nbinds {\n Mod off\n}\n").unwrap();
+        assert_eq!(settings.tap_action, None);
+    }
+
+    #[test]
+    fn tap_node_fails_with_migration_hint() {
+        let error = parse_settings("layouts \"us\" \"ru\"\ntap \"meta\"\n").unwrap_err();
+        assert!(error.to_string().contains("bare-`Mod`"), "{error}");
+    }
+
+    #[test]
+    fn duplicate_bare_mod_fails() {
+        assert!(
+            parse_settings("layouts \"us\" \"ru\"\nbinds {\n Mod word\n Mod selection\n}\n")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn bare_non_mod_fails() {
+        assert!(parse_settings("layouts \"us\" \"ru\"\nbinds {\n Shift word\n}\n").is_err());
+    }
+
+    #[test]
+    fn modifier_key_expands_to_both_sides() {
+        let settings =
+            parse_settings("layouts \"us\" \"ru\"\nbinds {\n Mod+Shift selection\n}\n").unwrap();
+        assert_eq!(settings.binds.len(), 2);
+        assert_eq!(
+            settings.binds[0].scancode,
+            evdev::KeyCode::KEY_LEFTSHIFT.code()
+        );
+        assert_eq!(
+            settings.binds[1].scancode,
+            evdev::KeyCode::KEY_RIGHTSHIFT.code()
+        );
+        assert!(settings.binds.iter().all(|bind| bind.mods.meta));
+    }
+
+    #[test]
+    fn double_shift_parses_and_defaults_to_word() {
+        let settings = parse_settings("layouts \"us\" \"ru\"\n").unwrap();
+        assert_eq!(settings.pair_base, GestureKind::Word);
+        let settings = parse_settings("layouts \"us\" \"ru\"\ndouble-shift selection\n").unwrap();
+        assert_eq!(settings.pair_base, GestureKind::Selection);
+        assert!(parse_settings("layouts \"us\" \"ru\"\ndouble-shift turbo\n").is_err());
+        assert!(
+            parse_settings("layouts \"us\" \"ru\"\ndouble-shift word\ndouble-shift word\n")
+                .is_err()
+        );
     }
 
     #[test]

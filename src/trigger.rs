@@ -49,17 +49,6 @@ pub enum Key {
     Other,
 }
 
-/// Which modifier (if any) converts on a lone tap. From the config `tap`
-/// node; absent means [`TapMode::Meta`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum TapMode {
-    /// Lone Meta tap converts (Ctrl+tap selects).
-    #[default]
-    Meta,
-    /// No tap trigger.
-    Off,
-}
-
 /// Modifier set of a daemon-side bind, in niri spelling (`Mod` is Super).
 /// At least one modifier is required; Alt is rejected at config load
 /// until the machine tracks it.
@@ -181,7 +170,11 @@ pub struct TriggerMachine {
     meta_release_ms: [Option<u64>; 2],
     tap_press_ms: Option<u64>,
     tap_disturbed: bool,
-    tap: TapMode,
+    /// Lone-Mod-tap scope from a bare-`Mod` bind; `None` disables the tap.
+    tap_action: Option<GestureKind>,
+    /// Plain-pair scope from the `double-shift` node (modified pairs keep
+    /// phrase/selection).
+    pair_base: GestureKind,
     binds: Vec<Bind>,
     timing: TimingConfig,
     last_gesture: Option<(GestureKind, u64)>,
@@ -199,7 +192,8 @@ impl TriggerMachine {
             meta_release_ms: [None, None],
             tap_press_ms: None,
             tap_disturbed: false,
-            tap: TapMode::Meta,
+            tap_action: Some(GestureKind::Word),
+            pair_base: GestureKind::Word,
             binds: Vec::new(),
             timing: TimingConfig::default(),
             last_gesture: None,
@@ -223,9 +217,14 @@ impl TriggerMachine {
         self.meta_down[0] || self.meta_down[1]
     }
 
-    /// Tap trigger mode from the config (`tap "meta"` by default).
-    pub fn set_tap(&mut self, tap: TapMode) {
-        self.tap = tap;
+    /// Lone-Mod-tap scope from a bare-`Mod` bind; `None` disables the tap.
+    pub fn set_tap_action(&mut self, tap_action: Option<GestureKind>) {
+        self.tap_action = tap_action;
+    }
+
+    /// Plain-pair scope from the `double-shift` node.
+    pub fn set_pair_base(&mut self, pair_base: GestureKind) {
+        self.pair_base = pair_base;
     }
 
     /// Daemon-side binds from the config (`binds` block).
@@ -321,7 +320,7 @@ impl TriggerMachine {
                     } else if self.other_side_down(side) {
                         GestureKind::Phrase
                     } else {
-                        GestureKind::Word
+                        self.pair_base
                     };
                     let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= self.timing.undo_ms);
                     self.last_gesture = Some((kind, now_ms));
@@ -367,9 +366,9 @@ impl TriggerMachine {
         } else {
             self.meta_down[i] = false;
             self.meta_release_ms[i] = Some(now_ms);
-            let tap = match self.tap {
-                TapMode::Off => None,
-                TapMode::Meta => match self.tap_press_ms {
+            let tap = match self.tap_action {
+                None => None,
+                Some(base) => match self.tap_press_ms {
                     Some(pressed_at)
                         if !self.tap_disturbed
                             && !self.shift_held()
@@ -378,7 +377,7 @@ impl TriggerMachine {
                         let kind = if self.ctrl_held() {
                             GestureKind::Selection
                         } else {
-                            GestureKind::Word
+                            base
                         };
                         let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= self.timing.undo_ms);
                         self.last_gesture = Some((kind, now_ms));
@@ -757,9 +756,23 @@ mod tests {
     #[test]
     fn tap_off_disables_mod_tap() {
         let mut m = TriggerMachine::new();
-        m.set_tap(TapMode::Off);
+        m.set_tap_action(None);
         assert_eq!(press(&mut m, Key::MetaLeft, T), None);
         assert_eq!(release(&mut m, Key::MetaLeft, T + 100), None);
+    }
+
+    #[test]
+    fn pair_base_remaps_plain_double_shift() {
+        let mut m = TriggerMachine::new();
+        m.set_pair_base(GestureKind::Selection);
+        let g = double_shift(&mut m, T);
+        assert_eq!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Selection,
+                undo: false
+            })
+        );
     }
 
     fn mod_meta(m: &mut TriggerMachine, at: u64) {

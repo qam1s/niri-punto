@@ -385,8 +385,9 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
 
     let start = Instant::now();
     let mut triggers = TriggerMachine::new();
-    triggers.set_tap(settings.tap);
+    triggers.set_tap_action(settings.tap_action);
     triggers.set_binds(settings.binds);
+    triggers.set_pair_base(settings.pair_base);
     triggers.set_timing(settings.timing);
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new(pair.clone());

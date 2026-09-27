@@ -111,6 +111,18 @@ pub fn scancode_by_name(name: &str) -> Option<u16> {
     Some(code.code())
 }
 
+/// Both side scancodes of a modifier key name, for binds of bare
+/// modifiers (`Mod+Shift` fires on either Shift press under Mod).
+pub fn modifier_scancodes(name: &str) -> Option<(u16, u16)> {
+    let (left, right) = match name {
+        "mod" => (KeyCode::KEY_LEFTMETA, KeyCode::KEY_RIGHTMETA),
+        "shift" => (KeyCode::KEY_LEFTSHIFT, KeyCode::KEY_RIGHTSHIFT),
+        "ctrl" => (KeyCode::KEY_LEFTCTRL, KeyCode::KEY_RIGHTCTRL),
+        _ => return None,
+    };
+    Some((left.code(), right.code()))
+}
+
 /// Whether a device with this name must be skipped. The daemon's own
 /// future uinput device is matched by exact name; nameless devices are
 /// kept (real keyboards always report a name, and skipping them would
@@ -316,6 +328,23 @@ mod tests {
     fn escape_resets() {
         assert!(is_reset(KeyCode::KEY_ESC.code()));
         assert!(!is_reset(KeyCode::KEY_A.code()));
+    }
+
+    #[test]
+    fn modifier_names_map_to_both_sides() {
+        assert_eq!(
+            modifier_scancodes("mod"),
+            Some((KeyCode::KEY_LEFTMETA.code(), KeyCode::KEY_RIGHTMETA.code()))
+        );
+        assert_eq!(
+            modifier_scancodes("shift"),
+            Some((
+                KeyCode::KEY_LEFTSHIFT.code(),
+                KeyCode::KEY_RIGHTSHIFT.code()
+            ))
+        );
+        assert_eq!(modifier_scancodes("alt"), None);
+        assert_eq!(modifier_scancodes("l"), None);
     }
 
     #[test]
