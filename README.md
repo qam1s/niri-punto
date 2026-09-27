@@ -34,72 +34,32 @@ niri-punto setup
 
 ## Usage
 
-| Gesture        | Action            |
-| -------------- | ----------------- |
-| Mod            | Convert word      |
-| Mod + Shift    | Convert phrase    |
-| Double Shift   | Convert selection |
-| Repeat gesture | Undo              |
-
-Prefer key binds? Put them in the punto config instead — daemon-side
-binds need no niri binds and scope exactly:
-
-```kdl
-binds {
-    Mod+L word
-    Mod+S selection
-}
-```
-
-Raw niri binds still work as an alternative:
-
-```kdl
-Mod+L { spawn "niri-punto" "convert-word"; }
-```
-
-The daemon must be running; the command asks it over the control
-socket. Raw niri binds cover word and selection only — phrase stays a
-Shift+Double Shift gesture (or a daemon-side bind). Note the bind's own
-key lands in the trailing word; daemon-side binds don't have this
-problem.
-
-Layouts are configured as an ordered pair in `config.kdl`; `niri-punto doctor`
-checks devices, permissions, the niri socket, and the index mapping.
+| Gesture        | Action                                   |
+| -------------- | ---------------------------------------- |
+| Mod            | Convert word or switch layout when empty |
+| Mod + Shift    | Convert phrase                           |
+| Double Shift   | Convert selection                        |
+| Repeat gesture | Undo                                     |
 
 ## Config
 
 `setup` writes the default config to `$XDG_CONFIG_HOME/niri-punto/config.kdl`
-and never overwrites an existing file. The core is the ordered layout pair:
+and never overwrites an existing file. The full default, line by line:
 
 ```kdl
+// Ordered layout pair: position maps to the niri layout index, so the
+// order must match the `layout` line in your niri config.
 layouts "us" "ru"
-```
-
-Position in the pair maps to the niri layout index, so the order must match
-the `layout` line in your niri config. `doctor` prints niri's layout names,
-the current index, and the resulting correspondence. With more than two
-system layouts, manual conversion works within the configured pair only.
-
-Triggers live here too — no niri binds needed:
-
-```kdl
+// Lone Mod tap trigger: `meta` converts on tap, `off` disables it.
 tap "meta"
+// Daemon-side binds in niri style, one per scope from the table above:
+// Mod held + key press converts, with no niri binds needed.
 binds {
     Mod+L word
+    Mod+P phrase
     Mod+S selection
 }
-```
-
-`tap` is the lone-modifier trigger (`meta` or `off`, default `meta`).
-Each `binds` entry is the required modifiers (`Mod`, `Shift`, `Ctrl` —
-at least one) held plus the key press, with the action `word`, `phrase`,
-or `selection`; key names are letters and digits. The bind key is the
-trigger, not text, so the converted scope stays exact. A bad file stops
-the daemon at start, like a bad `layouts` node.
-
-Trigger timings in milliseconds (absent keys mean the defaults):
-
-```kdl
+// Trigger timings in milliseconds: absent keys mean these defaults.
 timings {
     double-shift-ms 400
     undo-ms 3000
@@ -108,6 +68,14 @@ timings {
     tap-ms 300
 }
 ```
+
+`doctor` prints niri's layout names, the current index, and the resulting
+correspondence. With more than two system layouts, manual conversion
+works within the configured pair only. Each `binds` entry is the required
+modifiers (`Mod`, `Shift`, `Ctrl` — at least one) held plus the key press;
+key names are letters and digits. The bind key is the trigger, not text,
+so the converted scope stays exact. A bad file stops the daemon at start,
+like a bad `layouts` node.
 
 ## License
 

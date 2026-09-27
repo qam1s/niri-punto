@@ -24,11 +24,13 @@ pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pai
 layouts "us" "ru"
 // Lone Mod tap trigger: "meta" converts on tap, "off" disables it.
 tap "meta"
-// Daemon-side binds in niri style: no niri binds needed. Examples:
-// binds {
-//     Mod+L word
-//     Mod+S selection
-// }
+// Daemon-side binds in niri style: no niri binds needed. One per scope,
+// mirroring the gesture table in README.
+binds {
+    Mod+L word
+    Mod+P phrase
+    Mod+S selection
+}
 // Trigger timings in milliseconds: absent keys mean these defaults.
 timings {
     double-shift-ms 400
@@ -590,7 +592,11 @@ mod tests {
     fn default_config_settings_parse() {
         let settings = parse_settings(DEFAULT_CONFIG).unwrap();
         assert_eq!(settings.tap, TapMode::Meta);
-        assert!(settings.binds.is_empty());
+        assert_eq!(settings.binds.len(), 3);
+        assert_eq!(settings.binds[0].kind, GestureKind::Word);
+        assert_eq!(settings.binds[1].kind, GestureKind::Phrase);
+        assert_eq!(settings.binds[2].kind, GestureKind::Selection);
+        assert!(settings.binds.iter().all(|bind| bind.mods.meta));
     }
 
     #[test]
