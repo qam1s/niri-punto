@@ -22,14 +22,27 @@ fn missing(binary: &str) -> io::Error {
     )
 }
 
-/// Read the current primary selection: `wl-paste --primary --no-newline`.
-pub fn read_selection() -> io::Result<String> {
-    read_with("wl-paste", &["--primary", "--no-newline"])
+/// Selection I/O: read the primary selection, publish converted text. The
+/// production implementation shells out to wl-clipboard ([`WlClipboard`]);
+/// tests slot in an in-memory fake without Wayland.
+pub trait Clipboard {
+    /// Read the current primary selection.
+    fn read_selection(&mut self) -> io::Result<String>;
+    /// Publish `text` to the regular clipboard for a follow-up paste.
+    fn write_selection(&mut self, text: &str) -> io::Result<()>;
 }
 
-/// Publish `text` to the regular clipboard for a follow-up paste.
-pub fn write_selection(text: &str) -> io::Result<()> {
-    write_with("wl-copy", &[], text)
+/// Production clipboard over `wl-paste`/`wl-copy`.
+pub struct WlClipboard;
+
+impl Clipboard for WlClipboard {
+    fn read_selection(&mut self) -> io::Result<String> {
+        read_with("wl-paste", &["--primary", "--no-newline"])
+    }
+
+    fn write_selection(&mut self, text: &str) -> io::Result<()> {
+        write_with("wl-copy", &[], text)
+    }
 }
 
 fn read_with(binary: &str, args: &[&str]) -> io::Result<String> {

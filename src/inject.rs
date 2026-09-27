@@ -91,6 +91,18 @@ pub fn paste_strokes() -> Vec<KeyStroke> {
     ]
 }
 
+/// A sink for key transitions: erase, replay, paste. The production
+/// implementation is [`Injector`] (needs `/dev/uinput`); tests slot in a
+/// recording fake without hardware.
+pub trait Emitter {
+    /// Delete `count` characters with Backspace.
+    fn erase(&mut self, count: usize) -> io::Result<()>;
+    /// Replay recorded scancodes so they render in the new layout.
+    fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()>;
+    /// Paste the clipboard over the selection.
+    fn paste(&mut self) -> io::Result<()>;
+}
+
 /// uinput device that emits corrections. Open once, reuse across gestures.
 pub struct Injector {
     device: VirtualDevice,
@@ -134,6 +146,20 @@ impl Injector {
     /// Call only after the layout-changed barrier fired.
     pub fn paste(&mut self) -> io::Result<()> {
         self.emit_all(&paste_strokes())
+    }
+}
+
+impl Emitter for Injector {
+    fn erase(&mut self, count: usize) -> io::Result<()> {
+        Injector::erase(self, count)
+    }
+
+    fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()> {
+        Injector::replay(self, entries)
+    }
+
+    fn paste(&mut self) -> io::Result<()> {
+        Injector::paste(self)
     }
 }
 

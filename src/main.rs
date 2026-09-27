@@ -33,11 +33,12 @@ mod trigger;
 mod undo;
 
 use buffer::{BufferEntry, InputBuffer};
+use clipboard::Clipboard;
 use control::{ControlKind, ControlRequest};
 use convert::{ConversionPlan, Converter};
 use detector::{Detector, ManualOnly};
-use inject::Injector;
-use ipc::IpcClient;
+use inject::{Emitter, Injector};
+use ipc::{IpcClient, LayoutBackend};
 use reader::Reader;
 use selection::{SelectionConverter, SelectionPlan};
 use std::path::PathBuf;
@@ -64,7 +65,11 @@ fn usage() -> ! {
 /// The buffer stays frozen (see [`convert`]); only the [`Converter`] state
 /// advances, which the caller already updated. Returns false when any step
 /// failed (each failure is already logged); bind replies use it.
-fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPlan) -> bool {
+fn apply_plan(
+    ipc: &mut impl LayoutBackend,
+    injector: &mut impl Emitter,
+    plan: &ConversionPlan,
+) -> bool {
     if let Err(error) = injector.erase(plan.erase) {
         eprintln!("convert: erase failed: {error}");
         return false;
@@ -86,7 +91,7 @@ fn apply_plan(ipc: &mut IpcClient, injector: &mut Injector, plan: &ConversionPla
 /// Wait for the layout barrier, recovering a dead event stream with
 /// backoff first (compositor restarts must not kill conversions).
 /// Returns true when the barrier is satisfied; every failure is logged.
-fn wait_for_barrier(ipc: &mut IpcClient, target: u8) -> bool {
+fn wait_for_barrier(ipc: &mut impl LayoutBackend, target: u8) -> bool {
     match ipc.wait_for_layout(target) {
         Ok(()) => true,
         Err(error) => {
@@ -111,8 +116,8 @@ fn wait_for_barrier(ipc: &mut IpcClient, target: u8) -> bool {
 fn do_convert(
     entries: &[BufferEntry],
     converter: &mut Converter,
-    ipc: &mut IpcClient,
-    injector: &mut Injector,
+    ipc: &mut impl LayoutBackend,
+    injector: &mut impl Emitter,
 ) -> Result<String, String> {
     let (current, count) = ipc
         .current_layout()
@@ -135,14 +140,16 @@ fn do_convert(
 fn do_convert_selection(
     selection_converter: &mut SelectionConverter,
     converter: &mut Converter,
-    ipc: &mut IpcClient,
-    injector: &mut Injector,
+    ipc: &mut impl LayoutBackend,
+    injector: &mut impl Emitter,
+    clipboard: &mut impl Clipboard,
 ) -> Result<String, String> {
     let (current, count) = ipc
         .current_layout()
         .map_err(|error| format!("layout read failed: {error}"))?;
-    let text =
-        clipboard::read_selection().map_err(|error| format!("clipboard read failed: {error}"))?;
+    let text = clipboard
+        .read_selection()
+        .map_err(|error| format!("clipboard read failed: {error}"))?;
     let plan = selection_converter
         .convert(&text, current, count)
         .map_err(|error| format!("skipped ({error})"))?;
@@ -154,15 +161,15 @@ fn do_convert_selection(
     // A fresh selection conversion supersedes a pending word undo: "repeat"
     // only undoes the immediately preceding conversion.
     converter.invalidate();
-    apply_selection_plan(ipc, injector, &plan)?;
+    apply_selection_plan(ipc, injector, clipboard, &plan)?;
     Ok(detail)
 }
 
 /// Undo the last conversion; `None` when there is nothing to undo.
 fn do_undo(
     converter: &mut Converter,
-    ipc: &mut IpcClient,
-    injector: &mut Injector,
+    ipc: &mut impl LayoutBackend,
+    injector: &mut impl Emitter,
 ) -> Option<String> {
     let plan = converter.undo()?;
     let detail = format!(
@@ -179,11 +186,12 @@ fn do_undo(
 /// [`apply_plan`]: each failure is logged and returned, so bind replies
 /// report it instead of an unconditional Ok.
 fn apply_selection_plan(
-    ipc: &mut IpcClient,
-    injector: &mut Injector,
+    ipc: &mut impl LayoutBackend,
+    injector: &mut impl Emitter,
+    clipboard: &mut impl Clipboard,
     plan: &SelectionPlan,
 ) -> Result<(), String> {
-    if let Err(error) = clipboard::write_selection(&plan.converted) {
+    if let Err(error) = clipboard.write_selection(&plan.converted) {
         let detail = format!("clipboard write failed: {error}");
         eprintln!("convert selection: {detail}");
         return Err(detail);
@@ -372,6 +380,7 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     // (or app shortcuts). Fires on release, see `handle_key`.
     let mut pending: Option<PendingGesture> = None;
     let detector = ManualOnly;
+    let mut clipboard = clipboard::WlClipboard;
     eprintln!(
         "detector: {} (manual-only, no auto conversion)",
         detector.name()
@@ -399,6 +408,7 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
                     detector: &detector,
                     ipc: &mut ipc,
                     injector: &mut injector,
+                    clipboard: &mut clipboard,
                 };
                 handle_key(raw, &start, &mut daemon, &mut pending);
             }
@@ -442,6 +452,7 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
                         &mut converter,
                         &mut ipc,
                         &mut injector,
+                        &mut clipboard,
                     ) {
                         Ok(detail) => format!("ok bind-selection: {detail}"),
                         Err(detail) => format!("err bind-selection: {detail}"),
@@ -458,21 +469,35 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
 /// within the argument-count lint). The detector rides along so the future
 /// scorer slots into the gesture path without touching buffer, triggers, or
 /// injection (ADR-0006); `ManualOnly` always declines, so behavior is
-/// unchanged.
-struct Daemon<'a> {
+/// unchanged. `I`/`L`/`C` are the hardware seams (uinput, niri IPC,
+/// clipboard): production passes the real types, tests pass fakes.
+struct Daemon<'a, I: Emitter, L: LayoutBackend, C: Clipboard> {
     triggers: &'a mut TriggerMachine,
     buffer: &'a mut InputBuffer,
     converter: &'a mut Converter,
     selection_converter: &'a mut SelectionConverter,
     detector: &'a dyn Detector,
-    ipc: &'a mut IpcClient,
-    injector: &'a mut Injector,
+    ipc: &'a mut L,
+    injector: &'a mut I,
+    clipboard: &'a mut C,
 }
 
 fn handle_key(
     raw: reader::RawKey,
     start: &Instant,
-    daemon: &mut Daemon,
+    daemon: &mut Daemon<impl Emitter, impl LayoutBackend, impl Clipboard>,
+    pending: &mut Option<PendingGesture>,
+) {
+    handle_key_at(raw, start.elapsed().as_millis() as u64, daemon, pending);
+}
+
+/// Key handling at an explicit timestamp. Production passes wall-clock time
+/// via [`handle_key`]; tests pass scripted times to stay clear of the
+/// 30 ms debounce window without sleeping.
+fn handle_key_at(
+    raw: reader::RawKey,
+    now_ms: u64,
+    daemon: &mut Daemon<impl Emitter, impl LayoutBackend, impl Clipboard>,
     pending: &mut Option<PendingGesture>,
 ) {
     let Daemon {
@@ -483,8 +508,8 @@ fn handle_key(
         detector,
         ipc,
         injector,
+        clipboard,
     } = daemon;
-    let now_ms = start.elapsed().as_millis() as u64;
     let key = reader::classify(raw.scancode);
 
     if reader::is_typing_key(key, raw.value) {
@@ -539,13 +564,13 @@ fn handle_key(
     match staged.kind {
         GestureKind::Word => {
             if staged.undo && converter.has_pending_undo() {
-                if let Some(detail) = do_undo(converter, ipc, injector) {
+                if let Some(detail) = do_undo(converter, &mut **ipc, &mut **injector) {
                     eprintln!("undo: {detail}");
                 }
                 return;
             }
             let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
-            match do_convert(&word, converter, ipc, injector) {
+            match do_convert(&word, converter, &mut **ipc, &mut **injector) {
                 Ok(detail) => {
                     // A fresh word conversion supersedes a pending
                     // selection undo: "repeat" only undoes the
@@ -558,13 +583,13 @@ fn handle_key(
         }
         GestureKind::Phrase => {
             if staged.undo && converter.has_pending_undo() {
-                if let Some(detail) = do_undo(converter, ipc, injector) {
+                if let Some(detail) = do_undo(converter, &mut **ipc, &mut **injector) {
                     eprintln!("undo: {detail}");
                 }
                 return;
             }
             let phrase = buffer.phrase().to_vec();
-            match do_convert(&phrase, converter, ipc, injector) {
+            match do_convert(&phrase, converter, &mut **ipc, &mut **injector) {
                 Ok(detail) => eprintln!("phrase: {detail}"),
                 Err(detail) => eprintln!("phrase: {detail}"),
             }
@@ -576,16 +601,271 @@ fn handle_key(
                         "undo selection: paste back after layout {}",
                         plan.hop.target
                     );
-                    if let Err(detail) = apply_selection_plan(ipc, injector, &plan) {
+                    if let Err(detail) =
+                        apply_selection_plan(&mut **ipc, &mut **injector, &mut **clipboard, &plan)
+                    {
                         eprintln!("undo selection: {detail}");
                     }
                 }
                 return;
             }
-            match do_convert_selection(selection_converter, converter, ipc, injector) {
+            match do_convert_selection(
+                selection_converter,
+                converter,
+                &mut **ipc,
+                &mut **injector,
+                &mut **clipboard,
+            ) {
                 Ok(detail) => eprintln!("convert selection: {detail}"),
                 Err(detail) => eprintln!("convert selection: {detail}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::buffer::BufferEntry;
+    use crate::config::LayoutPair;
+    use evdev::KeyCode;
+    use std::io;
+
+    /// Recording uinput stand-in: no `/dev/uinput`, just the call log.
+    #[derive(Default)]
+    struct FakeEmitter {
+        erases: Vec<usize>,
+        replays: Vec<Vec<BufferEntry>>,
+        pastes: usize,
+    }
+
+    impl Emitter for FakeEmitter {
+        fn erase(&mut self, count: usize) -> io::Result<()> {
+            self.erases.push(count);
+            Ok(())
+        }
+
+        fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()> {
+            self.replays.push(entries.to_vec());
+            Ok(())
+        }
+
+        fn paste(&mut self) -> io::Result<()> {
+            self.pastes += 1;
+            Ok(())
+        }
+    }
+
+    /// Niri stand-in: no `$NIRI_SOCKET`. Switches flip the reported index,
+    /// so the layout barrier passes immediately.
+    struct FakeLayouts {
+        current: u8,
+        count: usize,
+        switches: Vec<u8>,
+    }
+
+    impl LayoutBackend for FakeLayouts {
+        fn current_layout(&mut self) -> io::Result<(u8, usize)> {
+            Ok((self.current, self.count))
+        }
+
+        fn switch_to(&mut self, index: u8) -> io::Result<()> {
+            self.switches.push(index);
+            self.current = index;
+            Ok(())
+        }
+
+        fn wait_for_layout(&mut self, _target: u8) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn recover_barrier(&mut self, target: u8) -> io::Result<bool> {
+            Ok(self.current == target)
+        }
+    }
+
+    /// In-memory clipboard: no Wayland, no `wl-copy`/`wl-paste`.
+    struct FakeClipboard {
+        text: String,
+        written: Vec<String>,
+    }
+
+    impl Clipboard for FakeClipboard {
+        fn read_selection(&mut self) -> io::Result<String> {
+            Ok(self.text.clone())
+        }
+
+        fn write_selection(&mut self, text: &str) -> io::Result<()> {
+            self.written.push(text.to_string());
+            Ok(())
+        }
+    }
+
+    const T: u64 = 10_000;
+    const SHIFT: u16 = KeyCode::KEY_LEFTSHIFT.code();
+    const SHIFT_RIGHT: u16 = KeyCode::KEY_RIGHTSHIFT.code();
+    const CTRL: u16 = KeyCode::KEY_LEFTCTRL.code();
+    /// `ghbdtn`-shaped word: six scancodes, layout-agnostic.
+    const WORD: [u16; 6] = [34, 35, 32, 48, 49, 20];
+
+    struct Harness {
+        triggers: TriggerMachine,
+        buffer: InputBuffer,
+        converter: Converter,
+        selection_converter: SelectionConverter,
+        detector: ManualOnly,
+        ipc: FakeLayouts,
+        injector: FakeEmitter,
+        clipboard: FakeClipboard,
+        pending: Option<PendingGesture>,
+        now: u64,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let pair = LayoutPair::new("us", "ru").unwrap();
+            Self {
+                triggers: TriggerMachine::new(),
+                buffer: InputBuffer::default(),
+                converter: Converter::new(pair.clone()),
+                selection_converter: SelectionConverter::new(pair),
+                detector: ManualOnly,
+                ipc: FakeLayouts {
+                    current: 0,
+                    count: 2,
+                    switches: Vec::new(),
+                },
+                injector: FakeEmitter::default(),
+                clipboard: FakeClipboard {
+                    text: "ghbdtn".to_string(),
+                    written: Vec::new(),
+                },
+                pending: None,
+                now: T,
+            }
+        }
+
+        fn key(&mut self, scancode: u16, value: i32) {
+            let raw = reader::RawKey { scancode, value };
+            let mut daemon = Daemon {
+                triggers: &mut self.triggers,
+                buffer: &mut self.buffer,
+                converter: &mut self.converter,
+                selection_converter: &mut self.selection_converter,
+                detector: &self.detector,
+                ipc: &mut self.ipc,
+                injector: &mut self.injector,
+                clipboard: &mut self.clipboard,
+            };
+            handle_key_at(raw, self.now, &mut daemon, &mut self.pending);
+        }
+
+        fn at(&mut self, now: u64, scancode: u16, value: i32) {
+            self.now = now;
+            self.key(scancode, value);
+        }
+
+        fn tap(&mut self, now: u64, scancode: u16) {
+            self.at(now, scancode, 1);
+            self.at(now + 10, scancode, 0);
+        }
+
+        fn type_word(&mut self, start: u64) {
+            for (i, code) in WORD.iter().enumerate() {
+                let t = start + (i as u64) * 20;
+                self.at(t, *code, 1);
+                self.at(t + 10, *code, 0);
+            }
+        }
+
+        /// Double Shift with trigger-test spacing (past the 30 ms debounce,
+        /// inside the 400 ms pair window). Fires on the release at `t + 200`.
+        fn double_shift(&mut self, t: u64) {
+            self.at(t, SHIFT, 1);
+            self.at(t + 50, SHIFT, 0);
+            self.at(t + 150, SHIFT, 1);
+            self.at(t + 200, SHIFT, 0);
+        }
+    }
+
+    #[test]
+    fn word_gesture_erases_switches_and_replays() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.double_shift(T + 500);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.injector.erases, vec![6]);
+        assert_eq!(h.injector.replays.len(), 1);
+        assert_eq!(
+            h.injector.replays[0]
+                .iter()
+                .map(|e| e.scancode)
+                .collect::<Vec<_>>(),
+            WORD.to_vec()
+        );
+        assert!(h.converter.has_pending_undo());
+    }
+
+    #[test]
+    fn repeated_gesture_undoes() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.double_shift(T + 500);
+        h.double_shift(T + 900);
+        assert_eq!(h.ipc.switches, vec![1, 0]);
+        assert_eq!(h.injector.erases, vec![6, 6]);
+        assert_eq!(h.injector.replays.len(), 2);
+    }
+
+    #[test]
+    fn typing_between_cancels_undo_and_converts_fresh() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.double_shift(T + 500);
+        // Buffer freezes after conversion, so the trailing word is 6 + 1.
+        h.tap(T + 900, 30);
+        h.double_shift(T + 1100);
+        // Fresh 7-key word converts from the new layout back.
+        assert_eq!(h.ipc.switches, vec![1, 0]);
+        assert_eq!(h.injector.erases, vec![6, 7]);
+    }
+
+    #[test]
+    fn empty_word_converts_nothing() {
+        let mut h = Harness::new();
+        h.double_shift(T);
+        assert!(h.ipc.switches.is_empty());
+        assert!(h.injector.erases.is_empty());
+        assert!(h.injector.replays.is_empty());
+    }
+
+    #[test]
+    fn ctrl_double_shift_converts_selection() {
+        let mut h = Harness::new();
+        h.at(T, CTRL, 1);
+        h.at(T + 50, SHIFT, 1);
+        h.at(T + 100, SHIFT, 0);
+        h.at(T + 200, SHIFT, 1);
+        h.at(T + 250, SHIFT, 0);
+        // Ctrl still held: the gesture waits for release.
+        assert!(h.ipc.switches.is_empty());
+        h.at(T + 300, CTRL, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
+        assert_eq!(h.injector.pastes, 1);
+    }
+
+    #[test]
+    fn held_shift_double_shift_converts_phrase() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        // Phrase gesture: second Shift side while the first stays held.
+        h.at(T + 500, SHIFT, 1);
+        h.at(T + 550, SHIFT_RIGHT, 1);
+        h.at(T + 600, SHIFT_RIGHT, 0);
+        assert!(h.ipc.switches.is_empty());
+        h.at(T + 650, SHIFT, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.injector.erases, vec![6]);
     }
 }
