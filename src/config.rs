@@ -24,8 +24,8 @@ pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pai
 layout "us" "ru"
 // Daemon-side binds in niri style: no niri binds needed. A bare `Mod`
 // is the lone-tap scope (`off` disables the tap); hand-added combos are
-// modifiers-held-plus-key. Phrase needs no bind: hold one Shift and
-// press the other (mirroring the gesture table in README).
+// modifiers-held-plus-key. Phrase needs no bind: Mod+Shift (Mod first)
+// converts on Mod release (mirroring the gesture table in README).
 binds {
     Mod word
     Double-Shift selection

@@ -1318,6 +1318,23 @@ mod tests {
     }
 
     #[test]
+    fn mod_shift_chord_converts_phrase_on_mod_release() {
+        // Mod first, then Shift: the chord stages on the Shift press and
+        // converts the whole buffer once Mod is released (replaying under
+        // a held Mod would land in the compositor binds).
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.at(T + 500, SUPER, 1);
+        h.at(T + 550, SHIFT, 1);
+        assert!(h.ipc.switches.is_empty());
+        h.at(T + 600, SHIFT, 0);
+        assert!(h.ipc.switches.is_empty());
+        h.at(T + 650, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.injector.erases, vec![6]);
+    }
+
+    #[test]
     fn bind_converts_word_with_exact_scope() {
         let mut h = Harness::new();
         mod_l(&mut h.triggers);
