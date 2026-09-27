@@ -1,4 +1,4 @@
-//! niri-punto: Punto Switcher-style daemon for the niri compositor.
+//! niri-punto: keyboard layout corrector daemon for the niri compositor.
 //!
 //! Ticket 08 (word conversion): read real key presses, and on Double Shift
 //! erase the last word via uinput, switch the layout by explicit index over

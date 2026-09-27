@@ -4,7 +4,7 @@ version = "0.3.0"
 edition = "2024"
 rust-version = "1.87"
 license = "GPL-3.0-or-later"
-description = "Punto Switcher for the niri Wayland compositor"
+description = "Keyboard layout corrector for the niri Wayland compositor"
 repository = "https://github.com/qam1s/niri-punto"
 
 [dependencies]

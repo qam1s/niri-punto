@@ -1,21 +1,21 @@
 # niri-punto
 
-Punto Switcher-style layout correction for the [niri](https://github.com/niri-wm/niri)
-Wayland compositor. Typed text in the wrong layout? Hit the trigger — the text
-is rewritten in the right layout and the layout switches to match.
+Keyboard layout corrector for the [niri](https://github.com/niri-wm/niri)
+Wayland compositor. Typed text in the wrong layout? Hit the trigger and the text
+is rewritten in the right layout, and the layout switches to match.
 
 ## How it works
 
 The daemon reads key presses, remembers them as scancodes, and on your trigger
 erases the typed text, switches the layout by index over niri IPC, and replays
-the same scancodes — they render in the new layout. Repeating the gesture
+the same scancodes, they render in the new layout. Repeating the gesture
 undoes the conversion. It never grabs the keyboard: if the daemon dies, your
 keyboard keeps working.
 
 `niri-punto doctor` prints niri's layout names, the current index, and the resulting
 correspondence. With more than two system layouts, manual conversion
 works within the configured pair only. Each `binds` entry is the required
-modifiers (`Mod`, `Shift`, `Ctrl` — at least one) held plus the key press;
+modifiers (`Mod`, `Shift`, `Ctrl`, at least one) held plus the key press;
 key names are letters and digits. The bind key is the trigger, not text,
 so the converted scope stays exact. A bad file stops the daemon at start,
 like a bad `layout` node.
@@ -30,7 +30,7 @@ Requirements: [niri](https://github.com/niri-wm/niri),
    the `.sha256` checksum.
 2. Extract and run `./niri-punto setup`. Everything installs at user level
    (binary, systemd unit, default config); only the udev rule, the
-   modules-load entry and the driver load need root — `setup` escalates
+   modules-load entry and the driver load need root, `setup` escalates
    just those steps (or pass `--no-udev` and install them by hand).
 
 Or via cargo (needs a Rust toolchain):
@@ -47,7 +47,7 @@ niri-punto setup
 | Mod            | word      | Convert word or switch layout when empty |
 | Mod + L        | phrase    | Convert phrase                           |
 | Double Shift   | selection | Convert selection                        |
-| Repeat gesture | undo      | Undo                                     |
+| Repeat gesture | undo      | Undo previous conversion                 |
 
 ## Config
 
@@ -56,13 +56,12 @@ niri-punto setup
 file.
 
 ```kdl
-// Ordered layout pair must match the `layout` line in your niri config.
 layout "us" "ru"
 
 binds {
     Mod word
     Mod+L phrase
-    double-shift selection
+    Double-Shift selection
 }
 
 timings {

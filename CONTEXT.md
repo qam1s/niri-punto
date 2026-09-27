@@ -1,6 +1,6 @@
 # niri-punto
 
-A Punto Switcher-style daemon for the niri Wayland compositor: text typed in
+A keyboard layout corrector daemon for the niri Wayland compositor: text typed in
 the wrong layout is converted on explicit user action, and the layout is
 switched to match.
 
