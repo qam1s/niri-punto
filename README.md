@@ -73,6 +73,17 @@ timings {
 }
 ```
 
+## Troubleshooting
+
+Layout switched between typing and triggering (you typed `ghbdtn` in us,
+something flipped to ru before you hit the trigger): the daemon reads the
+typed text itself, not the current layout indicator. When it is confident
+about the intended layout it converts toward that layout, ignoring which
+one is current. When it is unsure it keeps the old behavior and toggles
+from the current layout. Unsure inputs are short text (under 3 letters),
+mixed-language phrases, transliteration (`privet`), and code-like tokens
+(`http`, `cfg`): those always fall back to the current-layout toggle.
+
 ## Development
 
 `just test` runs the test suite, `just lint` runs clippy and fmt checks.
