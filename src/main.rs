@@ -43,7 +43,7 @@ use selection::{SelectionConverter, SelectionPlan};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use trigger::{GestureKind, TriggerMachine};
+use trigger::{Gesture, GestureKind, PendingGesture, TriggerMachine};
 
 /// How often the main loop wakes to serve control-socket bind requests.
 const CONTROL_POLL: Duration = Duration::from_millis(100);
@@ -367,6 +367,10 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new(pair.clone());
     let mut selection_converter = SelectionConverter::new(pair);
+    // Gestures and bind requests wait here while modifiers are physically
+    // held: replaying under a held Shift/Ctrl would render uppercase text
+    // (or app shortcuts). Fires on release, see `handle_key`.
+    let mut pending: Option<PendingGesture> = None;
     let detector = ManualOnly;
     eprintln!(
         "detector: {} (manual-only, no auto conversion)",
@@ -396,10 +400,29 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
                     ipc: &mut ipc,
                     injector: &mut injector,
                 };
-                handle_key(raw, &start, &mut daemon);
+                handle_key(raw, &start, &mut daemon, &mut pending);
             }
         }
         while let Ok(request) = ctrl_rx.try_recv() {
+            // Binds fire while their own modifier may still be held (Mod in
+            // Mod+L): route through the same wait-for-release slot, else the
+            // replay lands as shortcuts/uppercase. Bound by the same timeout.
+            if !triggers.modifiers_free() {
+                let now_ms = start.elapsed().as_millis() as u64;
+                let kind = match request.kind {
+                    ControlKind::Word => GestureKind::Word,
+                    ControlKind::Selection => GestureKind::Selection,
+                };
+                pending = Some(PendingGesture::new(Gesture { kind, undo: false }, now_ms));
+                eprintln!(
+                    "control: {} deferred until modifiers release",
+                    request.kind.as_line().trim()
+                );
+                let _ = request
+                    .reply
+                    .send("ok deferred until modifiers release".to_string());
+                continue;
+            }
             let answer = match request.kind {
                 ControlKind::Word => {
                     let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
@@ -446,7 +469,12 @@ struct Daemon<'a> {
     injector: &'a mut Injector,
 }
 
-fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
+fn handle_key(
+    raw: reader::RawKey,
+    start: &Instant,
+    daemon: &mut Daemon,
+    pending: &mut Option<PendingGesture>,
+) {
     let Daemon {
         triggers,
         buffer,
@@ -461,9 +489,11 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
 
     if reader::is_typing_key(key, raw.value) {
         // New physical input cancels a pending undo: "repeat" only undoes
-        // an immediately preceding conversion.
+        // an immediately preceding conversion. It also cancels a gesture
+        // still waiting for modifiers: the context moved on.
         converter.invalidate();
         selection_converter.invalidate();
+        *pending = None;
         if raw.value == 1 {
             if reader::is_reset(raw.scancode) {
                 buffer.clear();
@@ -485,16 +515,30 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
     }
 
     let pressed = raw.value != 0;
-    let Some(gesture) = triggers.key(key, pressed, now_ms) else {
+    if let Some(gesture) = triggers.key(key, pressed, now_ms) {
+        // Latest gesture wins: it supersedes anything still waiting.
+        *pending = Some(PendingGesture::new(gesture, now_ms));
+    }
+    let Some(staged) = pending.take() else {
         return;
     };
+    if staged.expired(now_ms) {
+        eprintln!("convert: gesture expired with modifiers held; tap again");
+        return;
+    }
+    if !staged.ready(now_ms, triggers.modifiers_free()) {
+        // Shift/Ctrl still physically held: replaying now would render
+        // uppercase text (or app shortcuts for Ctrl). Wait for release.
+        *pending = Some(staged);
+        return;
+    }
     // Detector seam (ADR-0006): the future scorer observes the buffer here,
     // at the gesture decision point. ManualOnly always declines, so the
     // result is intentionally unused and behavior stays manual-only.
     let _auto_score = detector.score(buffer.phrase());
-    match gesture.kind {
+    match staged.kind {
         GestureKind::Word => {
-            if gesture.undo && converter.has_pending_undo() {
+            if staged.undo && converter.has_pending_undo() {
                 if let Some(detail) = do_undo(converter, ipc, injector) {
                     eprintln!("undo: {detail}");
                 }
@@ -513,7 +557,7 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
             }
         }
         GestureKind::Phrase => {
-            if gesture.undo && converter.has_pending_undo() {
+            if staged.undo && converter.has_pending_undo() {
                 if let Some(detail) = do_undo(converter, ipc, injector) {
                     eprintln!("undo: {detail}");
                 }
@@ -526,7 +570,7 @@ fn handle_key(raw: reader::RawKey, start: &Instant, daemon: &mut Daemon) {
             }
         }
         GestureKind::Selection => {
-            if gesture.undo && selection_converter.has_pending_undo() {
+            if staged.undo && selection_converter.has_pending_undo() {
                 if let Some(plan) = selection_converter.undo() {
                     eprintln!(
                         "undo selection: paste back after layout {}",
