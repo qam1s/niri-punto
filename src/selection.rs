@@ -15,7 +15,7 @@ use crate::config::LayoutPair;
 use crate::convert::ConversionError;
 use crate::keymaps;
 use crate::scorer::Intended;
-use crate::undo::{LayoutCtx, LayoutHop, Reversible, UndoChain};
+use crate::undo::{HasHop, LayoutCtx, LayoutHop, Reversible, UndoChain};
 
 /// One selection step: clipboard text to write and layout hop to take.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -36,6 +36,12 @@ impl Reversible for SelectionPlan {
             original: self.converted.clone(),
             converted: self.original.clone(),
         }
+    }
+}
+
+impl HasHop for SelectionPlan {
+    fn hop_target(&self) -> u8 {
+        self.hop.target
     }
 }
 
@@ -137,6 +143,12 @@ impl SelectionConverter {
     /// Whether a repeated gesture has a conversion to undo.
     pub fn has_pending_undo(&self) -> bool {
         self.chain.has_pending_undo()
+    }
+
+    /// Hop target of the last remembered step: after a successful apply
+    /// the layout sits there, so the input buffer re-anchors to it.
+    pub fn last_target(&self) -> Option<u8> {
+        self.chain.last_target()
     }
 
     /// Undo the last step (or redo the undo, toggling back). Returns `None`

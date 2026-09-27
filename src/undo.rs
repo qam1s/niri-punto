@@ -86,6 +86,12 @@ pub trait Reversible: Clone {
     fn reversed(&self) -> Self;
 }
 
+/// A plan step carrying a layout hop: exposes its target so the input
+/// buffer can re-anchor its birth layout after a successful apply.
+pub trait HasHop {
+    fn hop_target(&self) -> u8;
+}
+
 /// Tracks the convert/undo chain across gestures.
 ///
 /// A fresh gesture plans a new conversion and remembers it; a repeated
@@ -109,6 +115,16 @@ impl<T: Reversible> UndoChain<T> {
     /// Whether a repeated gesture has a conversion to undo.
     pub fn has_pending_undo(&self) -> bool {
         self.last.is_some()
+    }
+
+    /// The hop target of the last remembered step, if any: after a
+    /// successful apply the layout sits there, so the input buffer
+    /// re-anchors its birth layout to it.
+    pub fn last_target(&self) -> Option<u8>
+    where
+        T: HasHop,
+    {
+        self.last.as_ref().map(|step| step.hop_target())
     }
 
     /// Undo the last step (or redo the undo, toggling back). Returns `None`

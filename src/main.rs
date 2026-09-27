@@ -548,6 +548,9 @@ fn handle_control(
                     // Bind conversions supersede a pending selection
                     // undo, same as the gesture path.
                     selection_converter.invalidate();
+                    if let Some(target) = converter.last_target() {
+                        buffer.reanchor(target);
+                    }
                     format!("ok bind-word: {detail}")
                 }
                 Err(detail) => format!("err bind-word: {detail}"),
@@ -562,7 +565,12 @@ fn handle_control(
                 &mut **clipboard,
                 *detector,
             ) {
-                Ok(detail) => format!("ok bind-selection: {detail}"),
+                Ok(detail) => {
+                    if let Some(target) = selection_converter.last_target() {
+                        buffer.reanchor(target);
+                    }
+                    format!("ok bind-selection: {detail}")
+                }
                 Err(detail) => format!("err bind-selection: {detail}"),
             }
         }
@@ -604,12 +612,14 @@ fn note_focus(
     match daemon.ipc.focused_window_id() {
         Ok(focus) => {
             *focus_broken = false;
-            if last_focus.replace(focus).is_some_and(|old| old != focus) {
-                daemon.buffer.clear();
-                daemon.converter.invalidate();
-                daemon.selection_converter.invalidate();
-                *pending = None;
-                eprintln!("focus: window changed, buffer cleared");
+            if let Some(old) = last_focus.replace(focus) {
+                if old != focus {
+                    daemon.buffer.clear();
+                    daemon.converter.invalidate();
+                    daemon.selection_converter.invalidate();
+                    *pending = None;
+                    eprintln!("focus: window changed ({old:?} -> {focus:?}), buffer cleared");
+                }
             }
         }
         Err(error) => {
@@ -723,6 +733,9 @@ fn handle_key_at(
         GestureKind::Word => {
             if staged.undo && converter.has_pending_undo() {
                 if let Some(detail) = do_undo(converter, &mut **ipc, &mut **injector) {
+                    if let Some(target) = converter.last_target() {
+                        buffer.reanchor(target);
+                    }
                     eprintln!("undo: {detail}");
                 }
                 return;
@@ -758,6 +771,9 @@ fn handle_key_at(
                     // selection undo: "repeat" only undoes the
                     // immediately preceding conversion.
                     selection_converter.invalidate();
+                    if let Some(target) = converter.last_target() {
+                        buffer.reanchor(target);
+                    }
                     eprintln!("convert: {detail}");
                 }
                 Err(detail) => eprintln!("convert: {detail}"),
@@ -766,6 +782,9 @@ fn handle_key_at(
         GestureKind::Phrase => {
             if staged.undo && converter.has_pending_undo() {
                 if let Some(detail) = do_undo(converter, &mut **ipc, &mut **injector) {
+                    if let Some(target) = converter.last_target() {
+                        buffer.reanchor(target);
+                    }
                     eprintln!("undo: {detail}");
                 }
                 return;
@@ -780,7 +799,12 @@ fn handle_key_at(
                 &mut **ipc,
                 &mut **injector,
             ) {
-                Ok(detail) => eprintln!("phrase: {detail}"),
+                Ok(detail) => {
+                    if let Some(target) = converter.last_target() {
+                        buffer.reanchor(target);
+                    }
+                    eprintln!("phrase: {detail}")
+                }
                 Err(detail) => eprintln!("phrase: {detail}"),
             }
         }
@@ -791,10 +815,10 @@ fn handle_key_at(
                         "undo selection: paste back after layout {}",
                         plan.hop.target
                     );
-                    if let Err(detail) =
-                        apply_selection_plan(&mut **ipc, &mut **injector, &mut **clipboard, &plan)
+                    match apply_selection_plan(&mut **ipc, &mut **injector, &mut **clipboard, &plan)
                     {
-                        eprintln!("undo selection: {detail}");
+                        Ok(()) => buffer.reanchor(plan.hop.target),
+                        Err(detail) => eprintln!("undo selection: {detail}"),
                     }
                 }
                 return;
@@ -807,7 +831,12 @@ fn handle_key_at(
                 &mut **clipboard,
                 *detector,
             ) {
-                Ok(detail) => eprintln!("convert selection: {detail}"),
+                Ok(detail) => {
+                    if let Some(target) = selection_converter.last_target() {
+                        buffer.reanchor(target);
+                    }
+                    eprintln!("convert selection: {detail}")
+                }
                 Err(detail) => eprintln!("convert selection: {detail}"),
             }
         }
@@ -1173,6 +1202,26 @@ mod tests {
         h.at(T + 600, SUPER, 0);
         assert_eq!(h.ipc.switches, vec![0]);
         assert_eq!(h.injector.erases, vec![6]);
+    }
+
+    #[test]
+    fn second_word_after_a_flip_reanchors_and_converts_away() {
+        // Word 1 flips us->ru; the frozen buffer must not keep the stale
+        // birth: word 2 (typed under ru, RU verdict, current ru) flips
+        // back instead of flapping a no-op hop.
+        let mut h = Harness::with_detector(Box::new(BigramDetector));
+        h.type_codes(T, &GHBTDN);
+        h.double_shift(T + 500);
+        assert_eq!(h.ipc.switches, vec![1]);
+        // Space plus word 2 under the new layout (typing also retires the
+        // pending undo, so the tap below converts fresh).
+        h.at(T + 2000, KeyCode::KEY_SPACE.code(), 1);
+        h.at(T + 2010, KeyCode::KEY_SPACE.code(), 0);
+        h.type_codes(T + 2100, &GHBTDN);
+        h.at(T + 3000, SUPER, 1);
+        h.at(T + 3100, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1, 0]);
+        assert_eq!(h.injector.erases, vec![6, 6]);
     }
 
     #[test]

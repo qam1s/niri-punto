@@ -52,6 +52,13 @@ impl InputBuffer {
         self.birth_layout
     }
 
+    /// Move the anchor to `layout` after a successful apply: the replayed
+    /// text now matches that layout, so later fills must not inherit the
+    /// pre-conversion anchor (the buffer itself stays frozen for undo).
+    pub fn reanchor(&mut self, layout: u8) {
+        self.birth_layout = Some(layout);
+    }
+
     pub fn push(&mut self, entry: BufferEntry) {
         if self.entries.len() >= self.capacity {
             let overflow = self.entries.len() - self.capacity + 1;
