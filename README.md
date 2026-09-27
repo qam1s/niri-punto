@@ -1,5 +1,11 @@
 # niri-punto
 
+<p align="center">
+    <a href="https://github.com/qam1s/niri-punto/blob/main/LICENSE"><img alt="GitHub License" src="https://img.shields.io/github/license/qam1s/niri-punto"></a>
+    <a href="https://github.com/qam1s/niri-punto/releases"><img alt="GitHub Release" src="https://img.shields.io/github/v/release/qam1s/niri-punto?logo=github"></a>
+    <a href="https://github.com/qam1s/niri-punto/actions/workflows/build.yml"><img alt="Build" src="https://github.com/qam1s/niri-punto/actions/workflows/build.yml/badge.svg"></a>
+</p>
+
 Keyboard layout corrector for the [niri](https://github.com/niri-wm/niri)
 Wayland compositor. Typed text in the wrong layout? Hit the trigger and the text
 is rewritten in the right layout, and the layout switches to match.
