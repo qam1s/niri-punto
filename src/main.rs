@@ -14,6 +14,7 @@ mod setup;
 mod trigger;
 mod undo;
 mod uninstall;
+mod update;
 
 use buffer::{BufferEntry, InputBuffer};
 use control::{ControlKind, ControlRequest};
@@ -39,6 +40,7 @@ fn usage() -> ! {
         "  setup [--no-udev] [--dry-run]  register this binary, install unit, config, udev rule"
     );
     eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule, cargo copy");
+    eprintln!("  update [--dry-run]              refresh the cargo install and restart");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("  version                print the daemon version");
     eprintln!("niri binds (e.g. Mod+L) use the convert-word subcommand.");
@@ -149,8 +151,8 @@ fn main() {
     let (command, rest) = match raw.first().map(String::as_str) {
         None | Some("--input-dir") | Some("--config") => ("run", raw.as_slice()),
         Some("--version") | Some("-V") => version(),
-        Some("run") | Some("convert-word") | Some("setup") | Some("uninstall") | Some("doctor")
-        | Some("version") => (raw[0].as_str(), &raw[1..]),
+        Some("run") | Some("convert-word") | Some("setup") | Some("uninstall") | Some("update")
+        | Some("doctor") | Some("version") => (raw[0].as_str(), &raw[1..]),
         _ => usage(),
     };
     match command {
@@ -195,6 +197,23 @@ fn main() {
                 usage();
             }
             std::process::exit(doctor::run());
+        }
+        "update" => {
+            let mut options = setup::Options::default();
+            for arg in rest {
+                match arg.as_str() {
+                    "--dry-run" => options.dry_run = true,
+                    _ => usage(),
+                }
+            }
+            let paths = match setup::resolve() {
+                Ok(paths) => paths,
+                Err(error) => {
+                    eprintln!("update: {error}");
+                    std::process::exit(1);
+                }
+            };
+            std::process::exit(update::run(options, &paths, &setup::RealRunner));
         }
         "version" => {
             if !rest.is_empty() {
