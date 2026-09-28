@@ -2,7 +2,9 @@
 
 use crate::config::{self, LayoutPair, RULE_FILE_NAME};
 use crate::ipc::IpcClient;
+use crate::setup::SERVICE_FILE_NAME;
 use std::fmt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// Where keyboard nodes live.
@@ -112,6 +114,86 @@ pub fn assess_rule(content: Option<&str>) -> RuleCheck {
 /// Read the installed rule, if any.
 pub fn read_rule() -> Option<String> {
     std::fs::read_to_string(RULE_DEST).ok()
+}
+
+/// Where `setup` writes the user unit it registers the binary with.
+pub fn unit_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let base = std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    Some(base.join("systemd").join("user").join(SERVICE_FILE_NAME))
+}
+
+/// Read the installed user unit, if any.
+pub fn read_unit_at(path: &Path) -> Option<String> {
+    std::fs::read_to_string(path).ok()
+}
+
+/// The binary a unit file starts: first token of the `ExecStart` line.
+pub fn unit_exec_target(unit: &str) -> Option<PathBuf> {
+    unit.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("ExecStart=")?;
+        let first = value.split_whitespace().next()?;
+        let unquoted = first.trim_matches('"');
+        (!unquoted.is_empty()).then(|| PathBuf::from(unquoted))
+    })
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    std::fs::metadata(path)
+        .map(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false)
+}
+
+/// How the registered unit fares.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum UnitCheck {
+    Ok { exe: PathBuf },
+    Missing,
+    NoExecStart,
+    Stale { exe: PathBuf },
+}
+
+impl fmt::Display for UnitCheck {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok { exe } => write!(f, "ok (ExecStart={})", exe.display()),
+            Self::Missing => write!(
+                f,
+                "MISSING: no user unit installed; \
+                 re-run `niri-punto setup` to re-register"
+            ),
+            Self::NoExecStart => write!(
+                f,
+                "PRESENT but no ExecStart found; \
+                 re-run `niri-punto setup` to re-register"
+            ),
+            Self::Stale { exe } => write!(
+                f,
+                "STALE: ExecStart={} is missing or not executable \
+                 (the binary moved?); re-run `niri-punto setup` to re-register",
+                exe.display()
+            ),
+        }
+    }
+}
+
+/// Assess unit content: `None` when the file could not be read.
+pub fn check_unit_exec(content: Option<&str>) -> UnitCheck {
+    let Some(text) = content else {
+        return UnitCheck::Missing;
+    };
+    let Some(exe) = unit_exec_target(text) else {
+        return UnitCheck::NoExecStart;
+    };
+    if is_executable_file(&exe) {
+        UnitCheck::Ok { exe }
+    } else {
+        UnitCheck::Stale { exe }
+    }
 }
 
 /// How /dev/uinput fares.
@@ -270,6 +352,20 @@ pub fn run() -> i32 {
         failed = true;
     }
     line("uinput", format!("{UINPUT_NODE}: {uinput}"));
+
+    match unit_path() {
+        Some(path) => {
+            let check = check_unit_exec(read_unit_at(&path).as_deref());
+            if !matches!(check, UnitCheck::Ok { .. }) {
+                failed = true;
+            }
+            line("service", format!("{}: {check}", path.display()));
+        }
+        None => {
+            failed = true;
+            line("service", "$HOME is unset: cannot locate user unit");
+        }
+    }
 
     let layouts = match std::env::var("NIRI_SOCKET") {
         Ok(socket) => {
@@ -484,5 +580,64 @@ mod tests {
         }
         .to_string();
         assert!(report.contains("modprobe"), "{report}");
+    }
+
+    #[test]
+    fn unit_exec_target_reads_the_first_token() {
+        assert_eq!(
+            unit_exec_target("[Service]\nExecStart=/opt/niri-punto/niri-punto\n"),
+            Some(PathBuf::from("/opt/niri-punto/niri-punto"))
+        );
+        assert_eq!(
+            unit_exec_target("ExecStart=/bin/niri-punto --flag\n"),
+            Some(PathBuf::from("/bin/niri-punto"))
+        );
+        assert_eq!(unit_exec_target("[Service]\nRestart=on-failure\n"), None);
+        assert_eq!(unit_exec_target("ExecStart=\n"), None);
+    }
+
+    #[test]
+    fn stale_unit_exec_warns_to_reregister() {
+        let dir = scratch("unit-stale");
+        let unit_path = dir.join("niri-punto.service");
+        std::fs::write(&unit_path, "[Service]\nExecStart=/nonexistent/niri-punto\n").unwrap();
+        let content = std::fs::read_to_string(&unit_path).unwrap();
+        let check = check_unit_exec(Some(&content));
+        assert_eq!(
+            check,
+            UnitCheck::Stale {
+                exe: PathBuf::from("/nonexistent/niri-punto")
+            }
+        );
+        let report = check.to_string();
+        assert!(report.contains("STALE"), "{report}");
+        assert!(report.contains("re-run `niri-punto setup`"), "{report}");
+    }
+
+    #[test]
+    fn unit_exec_check_covers_missing_and_healthy() {
+        assert_eq!(check_unit_exec(None), UnitCheck::Missing);
+        assert!(
+            check_unit_exec(None)
+                .to_string()
+                .contains("re-run `niri-punto setup`")
+        );
+        assert_eq!(
+            check_unit_exec(Some("[Service]\nRestart=on-failure\n")),
+            UnitCheck::NoExecStart
+        );
+
+        let dir = scratch("unit-ok");
+        let exe = dir.join("niri-punto");
+        std::fs::write(&exe, b"fake").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&exe).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&exe, permissions).unwrap();
+        let unit = format!("[Service]\nExecStart={}\n", exe.display());
+        assert_eq!(
+            check_unit_exec(Some(&unit)),
+            UnitCheck::Ok { exe: exe.clone() }
+        );
     }
 }

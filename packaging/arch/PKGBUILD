@@ -35,6 +35,6 @@ package() {
 	install -Dm0644 "contrib/70-niri-punto.rules" "$pkgdir/usr/lib/udev/rules.d/70-niri-punto.rules"
 	install -Dm0644 "contrib/niri-punto.conf" "$pkgdir/usr/lib/modules-load.d/niri-punto.conf"
 	install -Dm0644 "contrib/niri-punto.service" "$pkgdir/usr/lib/systemd/user/niri-punto.service"
-	sed -i 's|%h/.local/bin/niri-punto|/usr/bin/niri-punto|' "$pkgdir/usr/lib/systemd/user/niri-punto.service"
+	sed -i 's|@@NIRI_PUNTO_EXE@@|/usr/bin/niri-punto|' "$pkgdir/usr/lib/systemd/user/niri-punto.service"
 	install -Dm0644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
 }

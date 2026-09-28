@@ -3,7 +3,6 @@
 use crate::config::{self, MODULES_FILE_NAME, RULE_FILE_NAME};
 use crate::doctor;
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// Shipped unit, rule and modules-load entry, embedded so `setup` works
@@ -18,8 +17,8 @@ pub const STALE_RULE_DEST: &str = "/etc/udev/rules.d/99-niri-punto.rules";
 pub const SERVICE_FILE_NAME: &str = "niri-punto.service";
 
 /// System binary dir owned by a package manager. A `setup` running from
-/// here skips the binary, unit and udev steps (the package owns those
-/// files) and only manages the default config.
+/// here skips the unit and udev steps (the package owns those files)
+/// and only manages the default config.
 pub const PACKAGED_BIN_DIR: &str = "/usr/bin";
 
 /// Whether `exe` runs from a packaged install (e.g. `/usr/bin/niri-punto`
@@ -118,30 +117,20 @@ impl Runner for RealRunner {
     }
 }
 
-pub fn is_same_file(first: &Path, second: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    match (std::fs::metadata(first), std::fs::metadata(second)) {
-        (Ok(a), Ok(b)) => a.dev() == b.dev() && a.ino() == b.ino(),
-        _ => false,
-    }
+/// Placeholder in the shipped unit replaced with the running binary's path.
+pub const EXE_PLACEHOLDER: &str = "@@NIRI_PUNTO_EXE@@";
+
+/// Render the unit with `ExecStart` pointing at the binary `setup` runs from.
+pub fn render_unit(exe: &Path) -> String {
+    // `current_exe()` is absolute, so the unit keeps working after `setup` exits.
+    UNIT_SOURCE.replace(EXE_PLACEHOLDER, &exe.display().to_string())
 }
 
-pub fn install_binary(exe: &Path, dest: &Path) -> io::Result<()> {
+pub fn install_unit(dest: &Path, exe: &Path) -> io::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::copy(exe, dest)?;
-    let mut permissions = std::fs::metadata(dest)?.permissions();
-    permissions.set_mode(0o755);
-    std::fs::set_permissions(dest, permissions)?;
-    Ok(())
-}
-
-pub fn install_unit(dest: &Path) -> io::Result<()> {
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(dest, UNIT_SOURCE)?;
+    std::fs::write(dest, render_unit(exe))?;
     Ok(())
 }
 
@@ -249,24 +238,14 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
             "packaged install detected ({}): managing the config only",
             paths.exe.display()
         );
-    }
-    let binary_dest = paths.bin_dir.join("niri-punto");
-    if packaged {
-        println!("binary: owned by the package, skipped");
-    } else if !options.dry_run && is_same_file(&paths.exe, &binary_dest) {
-        println!("binary: already in place at {}", binary_dest.display());
-    } else if !step("binary", &binary_dest, options.dry_run, || {
-        install_binary(&paths.exe, &binary_dest)
-    }) {
-        return 1;
-    }
-
-    if packaged {
         println!("unit: owned by the package, skipped");
     } else if !step("unit", &paths.unit_path, options.dry_run, || {
-        install_unit(&paths.unit_path)
+        install_unit(&paths.unit_path, &paths.exe)
     }) {
         return 1;
+    }
+    if !packaged {
+        println!("unit: ExecStart={}", paths.exe.display());
     }
 
     if options.dry_run {
@@ -339,8 +318,10 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
     }
 
     if !packaged {
-        if let Some(warning) = path_warning(&paths.bin_dir) {
-            println!("{warning}");
+        if let Some(dir) = paths.exe.parent() {
+            if let Some(warning) = path_warning(dir) {
+                println!("{warning}");
+            }
         }
     }
     println!("verify: run `niri-punto doctor`");
@@ -479,7 +460,7 @@ mod tests {
     fn embedded_unit_is_a_graphical_user_unit_with_restart() {
         assert!(UNIT_SOURCE.contains("PartOf=graphical-session.target"));
         assert!(UNIT_SOURCE.contains("Restart=on-failure"));
-        assert!(UNIT_SOURCE.contains("ExecStart=%h/.local/bin/niri-punto"));
+        assert!(UNIT_SOURCE.contains(&format!("ExecStart={EXE_PLACEHOLDER}")));
         assert!(UNIT_SOURCE.contains("WantedBy=graphical-session.target"));
     }
 
@@ -505,55 +486,33 @@ mod tests {
     }
 
     #[test]
-    fn unit_install_writes_shipped_content() {
+    fn unit_install_points_at_the_running_exe() {
         let dir = scratch("setup-unit");
+        let exe = fake_exe(&dir);
         let dest = dir.join("systemd").join("user").join(SERVICE_FILE_NAME);
-        install_unit(&dest).unwrap();
-        assert_eq!(std::fs::read_to_string(&dest).unwrap(), UNIT_SOURCE);
+        install_unit(&dest, &exe).unwrap();
+        let unit = std::fs::read_to_string(&dest).unwrap();
+        assert!(unit.contains(&format!("ExecStart={}", exe.display())));
+        assert!(!unit.contains(EXE_PLACEHOLDER));
     }
 
     #[test]
-    fn binary_install_copies_and_marks_executable() {
-        let dir = scratch("setup-bin");
-        let exe = fake_exe(&dir);
-        let dest = dir.join("bin").join("niri-punto");
-        install_binary(&exe, &dest).unwrap();
-        assert_eq!(std::fs::read(&dest).unwrap(), b"fake-binary");
-        assert_ne!(
-            std::fs::metadata(&dest).unwrap().permissions().mode() & 0o111,
-            0
-        );
-    }
-
-    #[test]
-    fn same_file_spots_self_symlink_and_hardlink() {
-        let dir = scratch("setup-samefile");
-        let exe = fake_exe(&dir);
-        assert!(is_same_file(&exe, &exe));
-        let link = dir.join("link");
-        std::os::unix::fs::symlink(&exe, &link).unwrap();
-        assert!(is_same_file(&exe, &link));
-        let hard = dir.join("hard");
-        std::fs::hard_link(&exe, &hard).unwrap();
-        assert!(is_same_file(&exe, &hard));
-        let other = dir.join("other");
-        std::fs::write(&other, b"other").unwrap();
-        assert!(!is_same_file(&exe, &other));
-        assert!(!is_same_file(&exe, &dir.join("missing")));
-    }
-
-    #[test]
-    fn rerun_from_the_installed_binary_skips_the_copy() {
-        let (_root, mut paths) = test_paths("setup-self");
+    fn rerun_from_a_new_location_rewrites_the_unit() {
+        let (root, mut paths) = test_paths("setup-move");
         let runner = FakeRunner::new();
         assert_eq!(run(Options::default(), &paths, &runner), 0);
-        let installed = paths.bin_dir.join("niri-punto");
-        let mut permissions = std::fs::metadata(&installed).unwrap().permissions();
-        permissions.set_mode(0o444);
-        std::fs::set_permissions(&installed, permissions).unwrap();
-        paths.exe = installed.clone();
+        assert!(
+            std::fs::read_to_string(&paths.unit_path)
+                .unwrap()
+                .contains(&format!("ExecStart={}", paths.exe.display()))
+        );
+        let moved_dir = root.join("unpack");
+        std::fs::create_dir_all(&moved_dir).unwrap();
+        paths.exe = fake_exe(&moved_dir);
         assert_eq!(run(Options::default(), &paths, &runner), 0);
-        assert_eq!(std::fs::read(&installed).unwrap(), b"fake-binary");
+        let unit = std::fs::read_to_string(&paths.unit_path).unwrap();
+        assert!(unit.contains(&format!("ExecStart={}", paths.exe.display())));
+        assert!(!unit.contains(EXE_PLACEHOLDER));
     }
 
     #[test]
@@ -640,11 +599,9 @@ mod tests {
         let runner = FakeRunner::new();
         let code = run(Options::default(), &paths, &runner);
         assert_eq!(code, 0);
-        assert!(paths.bin_dir.join("niri-punto").is_file());
-        assert_eq!(
-            std::fs::read_to_string(&paths.unit_path).unwrap(),
-            UNIT_SOURCE
-        );
+        assert!(!paths.bin_dir.join("niri-punto").exists());
+        let unit = std::fs::read_to_string(&paths.unit_path).unwrap();
+        assert!(unit.contains(&format!("ExecStart={}", paths.exe.display())));
         assert_eq!(
             std::fs::read_to_string(&paths.config_path).unwrap(),
             DEFAULT_CONFIG
@@ -695,7 +652,6 @@ mod tests {
             dry_run: true,
         };
         assert_eq!(run(options, &paths, &runner), 0);
-        assert!(!paths.bin_dir.join("niri-punto").exists());
         assert!(!paths.unit_path.exists());
         assert!(!paths.config_path.exists());
         assert!(runner.commands.borrow().is_empty());
