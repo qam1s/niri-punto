@@ -16,7 +16,7 @@ The daemon reads key presses, remembers them as scancodes, and on your trigger
 erases the typed text, switches the layout by index over niri IPC, and replays
 the same scancodes, they render in the new layout. Repeating the gesture
 undoes the conversion. It never grabs the keyboard: if the daemon dies, your
-keyboard keeps working. Selection conversion goes through the clipboard
+keyboard keeps working. Selection conversion goes through the primary selection
 and needs [wl-clipboard](https://github.com/bugaevc/wl-clipboard).
 
 ## Install

@@ -55,13 +55,13 @@ pub fn replay_strokes(entries: &[BufferEntry]) -> Vec<KeyStroke> {
     out
 }
 
-/// Press/release pairs for Ctrl+V.
+/// Press/release pairs for Shift+Insert (layout-independent paste).
 pub fn paste_strokes() -> Vec<KeyStroke> {
-    let ctrl = KeyCode::KEY_LEFTCTRL.code();
-    let paste = KeyCode::KEY_V.code();
+    let shift = KeyCode::KEY_LEFTSHIFT.code();
+    let paste = KeyCode::KEY_INSERT.code();
     vec![
         KeyStroke {
-            scancode: ctrl,
+            scancode: shift,
             value: 1,
         },
         KeyStroke {
@@ -73,7 +73,7 @@ pub fn paste_strokes() -> Vec<KeyStroke> {
             value: 0,
         },
         KeyStroke {
-            scancode: ctrl,
+            scancode: shift,
             value: 0,
         },
     ]
@@ -280,14 +280,14 @@ mod tests {
     }
 
     #[test]
-    fn paste_emits_ctrl_v_tap() {
-        let ctrl = KeyCode::KEY_LEFTCTRL.code();
-        let paste = KeyCode::KEY_V.code();
+    fn paste_emits_shift_insert_tap() {
+        let shift = KeyCode::KEY_LEFTSHIFT.code();
+        let paste = KeyCode::KEY_INSERT.code();
         assert_eq!(
             paste_strokes(),
             vec![
                 KeyStroke {
-                    scancode: ctrl,
+                    scancode: shift,
                     value: 1
                 },
                 KeyStroke {
@@ -299,7 +299,7 @@ mod tests {
                     value: 0
                 },
                 KeyStroke {
-                    scancode: ctrl,
+                    scancode: shift,
                     value: 0
                 },
             ]
