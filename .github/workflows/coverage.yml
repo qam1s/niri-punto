@@ -1,0 +1,88 @@
+name: coverage
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+permissions:
+  contents: write # needed to publish badge.svg to the gh-badges branch
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@cargo-tarpaulin
+      - name: Run tarpaulin
+        run: cargo tarpaulin --locked --workspace --out Xml --output-dir /tmp/coverage | tee /tmp/coverage.txt
+      - name: Build badge.svg from cobertura.xml
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        run: |
+          python3 - <<'EOF'
+          import xml.etree.ElementTree as ET
+
+          tree = ET.parse("/tmp/coverage/cobertura.xml")
+          pct = float(tree.getroot().attrib["line-rate"]) * 100.0
+          label = "coverage"
+          value = f"{pct:.1f}".rstrip("0").rstrip(".") + "%"
+          color = (
+              "#4c1" if pct >= 90
+              else "#97ca00" if pct >= 80
+              else "#dfb317" if pct >= 70
+              else "#fe7d37" if pct >= 60
+              else "#e05d44"
+          )
+          lw = int(len(label) * 6.1 + 12)
+          rw = int(len(value) * 6.1 + 12)
+          w = lw + rw
+          svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="20" role="img" aria-label="{label}: {value}">"""
+          svg += f"""
+            <linearGradient id="s" x2="0" y2="100%">
+              <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+              <stop offset="1" stop-opacity=".1"/>
+            </linearGradient>
+            <clipPath id="r"><rect width="{w}" height="20" rx="3" fill="#fff"/></clipPath>
+            <g clip-path="url(#r)">
+              <rect width="{lw}" height="20" fill="#555"/>
+              <rect x="{lw}" width="{rw}" height="20" fill="{color}"/>
+              <rect width="{w}" height="20" fill="url(#s)"/>
+            </g>
+            <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11">
+              <text x="{lw / 2}" y="15" fill="#010101" fill-opacity=".3">{label}</text>
+              <text x="{lw / 2}" y="14">{label}</text>
+              <text x="{lw + rw / 2}" y="15" fill="#010101" fill-opacity=".3">{value}</text>
+              <text x="{lw + rw / 2}" y="14">{value}</text>
+            </g>
+          </svg>
+          """
+          with open("badge.svg", "w") as f:
+              f.write(svg)
+          print(f"coverage: {value}")
+          EOF
+      - name: Publish badge to gh-badges branch
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          BRANCH="gh-badges"
+          REPO="https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          rm -rf /tmp/gh-badges
+          if git ls-remote --exit-code --heads "$REPO" "$BRANCH" >/dev/null 2>&1; then
+            git clone --depth 1 --branch "$BRANCH" "$REPO" /tmp/gh-badges
+          else
+            mkdir -p /tmp/gh-badges
+            git -C /tmp/gh-badges init -b "$BRANCH"
+            git -C /tmp/gh-badges remote add origin "$REPO"
+          fi
+          cp badge.svg /tmp/gh-badges/badge.svg
+          cd /tmp/gh-badges
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add badge.svg
+          if git diff --cached --quiet; then
+            echo "badge unchanged"
+          else
+            git commit -m "docs: update coverage badge"
+            git push origin "$BRANCH"
+          fi
