@@ -21,8 +21,6 @@ and needs [wl-clipboard](https://github.com/bugaevc/wl-clipboard).
 
 ## Install
 
-Requirements: [niri](https://github.com/niri-wm/niri).
-
 Via cargo (needs a Rust toolchain):
 
 ```sh
