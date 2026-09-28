@@ -180,6 +180,15 @@ fn apply_selection_plan(
     clipboard: &mut impl Clipboard,
     plan: &SelectionPlan,
 ) -> Result<(), String> {
+    // Delete the highlighted selection first: taking primary ownership
+    // below drops the highlight, and a later paste would insert instead
+    // of replacing. One Backspace clears the whole selection while it is
+    // still live, so it runs before the clipboard write.
+    if let Err(error) = injector.erase(1) {
+        let detail = format!("selection delete failed: {error}");
+        eprintln!("convert selection: {detail}");
+        return Err(detail);
+    }
     if let Err(error) = clipboard.write_selection(&plan.converted) {
         let detail = format!("clipboard write failed: {error}");
         eprintln!("convert selection: {detail}");
@@ -1318,6 +1327,7 @@ mod tests {
         h.at(T + 300, CTRL, 0);
         assert_eq!(h.ipc.switches, vec![1]);
         assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
+        assert_eq!(h.injector.erases, vec![1]);
         assert_eq!(h.injector.pastes, 1);
     }
 
@@ -1346,6 +1356,7 @@ mod tests {
         h.at(T + 300, CTRL, 0);
         assert_eq!(h.ipc.switches, vec![0]);
         assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
+        assert_eq!(h.injector.erases, vec![1]);
         assert_eq!(h.injector.pastes, 1);
     }
 
@@ -1392,6 +1403,7 @@ mod tests {
         h.at(T + 300, CTRL, 0);
         assert_eq!(h.ipc.switches, vec![1]);
         assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
+        assert_eq!(h.injector.erases, vec![1]);
         assert_eq!(h.injector.pastes, 1);
     }
 
