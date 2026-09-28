@@ -26,7 +26,10 @@ impl Clipboard for WlClipboard {
     }
 
     fn write_selection(&mut self, text: &str) -> io::Result<()> {
-        // Primary selection, not the clipboard: pasted via Shift+Insert.
+        // Shift+Insert pastes the regular clipboard in GTK apps (browsers)
+        // but the primary selection in some terminals: stage the converted
+        // text in both so the paste lands everywhere.
+        write_with("wl-copy", &[], text)?;
         write_with("wl-copy", &["--primary"], text)
     }
 }
