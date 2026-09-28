@@ -1,8 +1,4 @@
 //! Double Shift trigger state machine.
-//!
-//! Pure logic: a stream of timestamped key presses and releases goes in,
-//! a recognized [`Gesture`] comes out. No I/O, no clock reads — the caller
-//! supplies `now_ms`, which keeps the machine unit-testable without hardware.
 
 /// Maximum gap between the two Shift presses of one trigger.
 pub const DOUBLE_SHIFT_WINDOW_MS: u64 = 400;
@@ -10,12 +6,10 @@ pub const DOUBLE_SHIFT_WINDOW_MS: u64 = 400;
 pub const UNDO_WINDOW_MS: u64 = 3000;
 /// Presses faster than this after a release are switch bounce, not intent.
 pub const DEBOUNCE_MS: u64 = 30;
-/// A lone Mod press released within this window is a tap gesture. Longer
-/// holds are chord prefixes (or hesitation), never a tap.
+/// A lone Mod press released within this window is a tap gesture.
 pub const TAP_WINDOW_MS: u64 = 300;
 
-/// All trigger timing knobs in one place. From the config `timings`
-/// block; absent means [`TimingConfig::default`], which is these consts.
+/// All trigger timing knobs in one place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TimingConfig {
     pub double_shift_ms: u64,
@@ -37,8 +31,7 @@ impl Default for TimingConfig {
     }
 }
 
-/// Keys the machine cares about. Everything else is [`Key::Other`],
-/// except [`Key::Fn`] below.
+/// Keys the machine cares about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
     ShiftLeft,
@@ -47,20 +40,13 @@ pub enum Key {
     CtrlRight,
     MetaLeft,
     MetaRight,
-    /// Fn: emits events on some keyboards (Apple) but carries no text
-    /// and no gesture meaning — always ignored, so it neither disturbs
-    /// a pending pair/tap nor reaches the buffer.
     Fn,
-    /// Alt sides: tracked so the buffer can tell menu shortcuts
-    /// (left Alt) from AltGr text input (right Alt, `menu_alt_held`).
     AltLeft,
     AltRight,
     Other,
 }
 
 /// Modifier set of a daemon-side bind, in niri spelling (`Mod` is Super).
-/// At least one modifier is required; Alt is rejected at config load
-/// until the machine tracks it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ModSet {
     pub meta: bool,
@@ -74,8 +60,7 @@ impl ModSet {
     }
 }
 
-/// A daemon-side bind from the config `binds` block: the modifiers held
-/// plus the key press convert with the given scope.
+/// A daemon-side bind from the config `binds` block.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Bind {
     pub mods: ModSet,
@@ -86,11 +71,8 @@ pub struct Bind {
 /// Which conversion scope a trigger asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GestureKind {
-    /// Double Shift: convert the last word.
     Word,
-    /// Shift held + Double Shift: convert the phrase.
     Phrase,
-    /// Ctrl held + Double Shift: convert the current selection.
     Selection,
 }
 
@@ -98,26 +80,17 @@ pub enum GestureKind {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Gesture {
     pub kind: GestureKind,
-    /// True when the same gesture repeats right after a previous one.
     pub undo: bool,
 }
 
-/// How long a recognized gesture waits for a modifier-free moment before
-/// it is dropped. Covers slow Shift releases; bounds the window in which a
-/// focus change could redirect the conversion.
+/// How long a recognized gesture waits for a modifier-free moment.
 pub const PENDING_TIMEOUT_MS: u64 = 2000;
 
-/// A gesture waiting for a modifier-free moment to run. Conversions must
-/// never replay while Shift/Ctrl is physically held: the held modifier
-/// would combine with the replayed scancodes (uppercase text, or app
-/// shortcuts for Ctrl), so the daemon fires these on release instead.
+/// A gesture waiting for a modifier-free moment to run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PendingGesture {
     pub kind: GestureKind,
     pub undo: bool,
-    /// True when the gesture completed on a lone Mod release. The Word
-    /// branch reads it: a tap with no text toggles the layout instead of
-    /// converting.
     pub tap: bool,
     deadline_ms: u64,
 }
@@ -132,13 +105,10 @@ impl PendingGesture {
         }
     }
 
-    /// Ready when no modifier is held and the wait has not expired.
     pub fn ready(&self, now_ms: u64, modifiers_free: bool) -> bool {
         modifiers_free && now_ms <= self.deadline_ms
     }
 
-    /// Too long since recognition (e.g. stuck modifier, focus moved on):
-    /// the caller drops it instead of converting stale context.
     pub fn expired(&self, now_ms: u64) -> bool {
         now_ms > self.deadline_ms
     }
@@ -159,17 +129,7 @@ impl Side {
     }
 }
 
-/// Recognizes Double Shift gestures and lone Mod taps from a key event
-/// stream.
-///
-/// Feed every press and release in order via [`TriggerMachine::key`]; it
-/// returns `Some(Gesture)` exactly at the second Shift press that completes
-/// a trigger, or at the Mod release that completes a tap — `None`
-/// otherwise. Autorepeat (press while already down) and bounce faster than
-/// [`DEBOUNCE_MS`] are ignored. Any text, edit, or action press between the
-/// two Shift presses cancels the pending pair (Alt and Fn never do:
-/// Alt+Tab switches windows, Fn+arrows move the caret); a tap needs a clean
-/// press-to-release with no Shift, text, or second-Mod key in between.
+/// Recognizes Double Shift gestures and lone Mod taps.
 pub struct TriggerMachine {
     shift_down: [bool; 2],
     ctrl_down: [bool; 2],
@@ -181,10 +141,7 @@ pub struct TriggerMachine {
     meta_release_ms: [Option<u64>; 2],
     tap_press_ms: Option<u64>,
     tap_disturbed: bool,
-    /// Lone-Mod-tap scope from a bare-`Mod` bind; `None` disables the tap.
     tap_action: Option<GestureKind>,
-    /// Plain-pair scope from the `double-shift` node (modified pairs keep
-    /// phrase/selection).
     pair_base: GestureKind,
     binds: Vec<Bind>,
     timing: TimingConfig,
@@ -212,66 +169,46 @@ impl TriggerMachine {
         }
     }
 
-    /// Shift currently held on either side (for buffer entry recording).
     pub fn shift_held(&self) -> bool {
         self.shift_down[0] || self.shift_down[1]
     }
 
-    /// Ctrl currently held on either side (for selection gestures).
     pub fn ctrl_held(&self) -> bool {
         self.ctrl_down[0] || self.ctrl_down[1]
     }
 
-    /// Mod (Super) currently held on either side. Tracked so a bind like
-    /// Mod+L waits for release: replaying scancodes under a held Mod lands
-    /// in the compositor's binds instead of the text field.
     pub fn meta_held(&self) -> bool {
         self.meta_down[0] || self.meta_down[1]
     }
 
-    /// Either Alt side held: replaying under Alt sends menu shortcuts,
-    /// so this blocks replay like the other modifiers.
     pub fn alt_held(&self) -> bool {
         self.alt_down[0] || self.alt_down[1]
     }
 
-    /// Left Alt held: the menu/layout key. Right Alt is AltGr on many
-    /// layouts and produces text, so the clear-on-shortcut rule keys off
-    /// the left side only.
     pub fn menu_alt_held(&self) -> bool {
         self.alt_down[Side::Left.index()]
     }
 
-    /// Lone-Mod-tap scope from a bare-`Mod` bind; `None` disables the tap.
     pub fn set_tap_action(&mut self, tap_action: Option<GestureKind>) {
         self.tap_action = tap_action;
     }
 
-    /// Plain-pair scope from the `double-shift` node.
     pub fn set_pair_base(&mut self, pair_base: GestureKind) {
         self.pair_base = pair_base;
     }
 
-    /// Daemon-side binds from the config (`binds` block).
     pub fn set_binds(&mut self, binds: Vec<Bind>) {
         self.binds = binds;
     }
 
-    /// Timing knobs from the config (`timings` block).
     pub fn set_timing(&mut self, timing: TimingConfig) {
         self.timing = timing;
     }
 
-    /// Stage a recognized gesture into the wait-for-release slot with the
-    /// configured pending timeout.
     pub fn stage(&self, gesture: Gesture, now_ms: u64) -> PendingGesture {
         PendingGesture::new(gesture, now_ms, self.timing.pending_ms)
     }
 
-    /// A configured bind key pressed with its modifiers held. The caller
-    /// checks press (not autorepeat) first; required modifiers must all be
-    /// held, extra ones are allowed. Undo accounting rides the shared
-    /// gesture chain, like taps.
     pub fn bind(&mut self, scancode: u16, now_ms: u64) -> Option<Gesture> {
         let kind = self
             .binds
@@ -289,8 +226,6 @@ impl TriggerMachine {
             && (!mods.ctrl || self.ctrl_held())
     }
 
-    /// No Shift, Ctrl, Mod, or Alt held anywhere: replaying scancodes now renders
-    /// exactly what the buffer holds, with no held-modifier interference.
     pub fn modifiers_free(&self) -> bool {
         !self.shift_held() && !self.ctrl_held() && !self.meta_held() && !self.alt_held()
     }
@@ -331,21 +266,16 @@ impl TriggerMachine {
     fn shift(&mut self, side: Side, pressed: bool, now_ms: u64) -> Option<Gesture> {
         let i = side.index();
         if pressed {
-            // A Shift chord voids a Mod tap; the tap never voids a pair.
             self.tap_disturbed = true;
             if self.shift_down[i] {
-                return None; // autorepeat, not a new press
+                return None;
             }
             if let Some(released) = self.last_release_ms[i]
                 && now_ms.saturating_sub(released) < self.timing.debounce_ms
             {
-                return None; // switch bounce
+                return None;
             }
             self.shift_down[i] = true;
-            // Mod+Shift chord (Mod first): phrase without a bind — a bare
-            // Mod+Shift has no letter key, so `binds` cannot express it.
-            // Ctrl narrows to Selection, mirroring the pair precedence
-            // below. Converts on Mod release via the pending slot.
             if self.meta_held() {
                 self.first_press_ms = None;
                 self.disturbed = false;
@@ -377,7 +307,6 @@ impl TriggerMachine {
                     Some(Gesture { kind, undo })
                 }
                 _ => {
-                    // No usable pending first press: start a new pair.
                     self.first_press_ms = Some(now_ms);
                     self.disturbed = false;
                     None
@@ -390,26 +319,19 @@ impl TriggerMachine {
         }
     }
 
-    /// A lone Mod tap: press and release within [`TAP_WINDOW_MS`] with no
-    /// Shift, text, or second-Mod key in between, and no Shift held at
-    /// release. Completes on release (modifiers are free by definition,
-    /// except a held Ctrl — that resolves to Selection and the caller
-    /// defers it). Ctrl modifies like in a pair and never cancels; a Mod
-    /// press still disturbs a pending Shift pair, as before.
     fn meta(&mut self, side: Side, pressed: bool, now_ms: u64) -> Option<Gesture> {
         let i = side.index();
         if pressed {
             if self.meta_down[i] {
-                return None; // autorepeat, not a new press
+                return None;
             }
             if let Some(released) = self.meta_release_ms[i]
                 && now_ms.saturating_sub(released) < self.timing.debounce_ms
             {
-                return None; // switch bounce
+                return None;
             }
             self.meta_down[i] = true;
             self.tap_press_ms = Some(now_ms);
-            // The other side already down means a chord, not a tap.
             self.tap_disturbed = self.meta_down[1 - i];
             self.disturbed = true;
             None
@@ -516,7 +438,6 @@ mod tests {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
-        // Past the window: a new first press, no gesture.
         assert_eq!(
             press(&mut m, Key::ShiftLeft, T + DOUBLE_SHIFT_WINDOW_MS + 100),
             None
@@ -525,7 +446,6 @@ mod tests {
             release(&mut m, Key::ShiftLeft, T + DOUBLE_SHIFT_WINDOW_MS + 150),
             None
         );
-        // Completing the new pair gestures.
         let g = press(&mut m, Key::ShiftLeft, T + DOUBLE_SHIFT_WINDOW_MS + 250);
         assert!(matches!(
             g,
@@ -540,7 +460,6 @@ mod tests {
     fn held_shift_turns_double_shift_into_phrase() {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
-        // Second press on the other side while the first is still held.
         let g = press(&mut m, Key::ShiftRight, T + 120);
         assert_eq!(
             g,
@@ -603,7 +522,6 @@ mod tests {
         let first = double_shift(&mut m, T);
         assert!(matches!(first, Some(Gesture { undo: false, .. })));
         release(&mut m, Key::ShiftLeft, T + 200);
-        // Phrase gesture after a word gesture: no undo.
         assert_eq!(press(&mut m, Key::ShiftLeft, T + 500), None);
         let phrase = press(&mut m, Key::ShiftRight, T + 600);
         assert_eq!(
@@ -638,7 +556,6 @@ mod tests {
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
         assert_eq!(press(&mut m, Key::Other, T + 100), None);
         assert_eq!(release(&mut m, Key::Other, T + 130), None);
-        // The second Shift press starts a fresh pair instead of gesturing.
         assert_eq!(press(&mut m, Key::ShiftLeft, T + 150), None);
     }
 
@@ -649,7 +566,6 @@ mod tests {
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
         assert_eq!(press(&mut m, Key::CtrlLeft, T + 100), None);
         assert_eq!(release(&mut m, Key::CtrlLeft, T + 130), None);
-        // Ctrl was released again: still a plain word gesture.
         let g = press(&mut m, Key::ShiftLeft, T + 150);
         assert!(matches!(
             g,
@@ -662,7 +578,6 @@ mod tests {
 
     #[test]
     fn fn_press_neither_cancels_the_pair_nor_voids_the_tap() {
-        // Fn carries no text: it must not disturb a pending pair ...
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
@@ -676,7 +591,6 @@ mod tests {
                 undo: false
             })
         ));
-        // ... nor a lone Mod tap (Fn+Left is Home on laptop keyboards).
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::MetaLeft, T), None);
         assert_eq!(press(&mut m, Key::Fn, T + 50), None);
@@ -703,7 +617,6 @@ mod tests {
         assert!(!m.modifiers_free());
         assert_eq!(release(&mut m, Key::AltLeft, T + 50), None);
         assert!(!m.alt_held());
-        // Right Alt (AltGr) tracks without counting as the menu key.
         assert_eq!(press(&mut m, Key::AltRight, T + 100), None);
         assert!(m.alt_held());
         assert!(!m.menu_alt_held());
@@ -714,8 +627,6 @@ mod tests {
 
     #[test]
     fn alt_between_shifts_keeps_the_pair() {
-        // Alt+Shift is the layout-switch chord: it must not break
-        // a pending pair the way text keys do.
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
@@ -735,10 +646,8 @@ mod tests {
     fn autorepeat_press_is_ignored() {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
-        // Repeat without release: ignored, and must not complete a pair.
         assert_eq!(press(&mut m, Key::ShiftLeft, T + 100), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 150), None);
-        // Next real press is past the window, so it starts a fresh pair.
         assert_eq!(press(&mut m, Key::ShiftLeft, T + 600), None);
     }
 
@@ -747,13 +656,11 @@ mod tests {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
-        // Bounce within the debounce window: ignored entirely.
         assert_eq!(
             press(&mut m, Key::ShiftLeft, T + 50 + DEBOUNCE_MS - 1),
             None
         );
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50 + DEBOUNCE_MS), None);
-        // A real press after the debounce window starts a fresh pair.
         assert_eq!(press(&mut m, Key::ShiftLeft, T + 500), None);
     }
 
@@ -801,8 +708,6 @@ mod tests {
 
     #[test]
     fn shift_press_with_mod_held_is_phrase_not_a_tap() {
-        // Mod+Shift chord: the Shift press yields Phrase (converting on
-        // Mod release); the Mod release itself taps nothing.
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::MetaLeft, T), None);
         assert_eq!(
@@ -871,7 +776,6 @@ mod tests {
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
         assert_eq!(press(&mut m, Key::MetaLeft, T + 100), None);
-        // The pair is disturbed, but the clean tap converts the word.
         let g = release(&mut m, Key::MetaLeft, T + 200);
         assert!(matches!(
             g,
@@ -917,7 +821,6 @@ mod tests {
                 undo: false
             })
         );
-        // Releases complete nothing further; the Mod release is no tap.
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 100), None);
         assert_eq!(release(&mut m, Key::MetaLeft, T + 150), None);
     }
@@ -963,9 +866,6 @@ mod tests {
 
     #[test]
     fn shift_then_mod_is_nothing() {
-        // Wrong order: Shift pressed first starts a pair, Mod press+release
-        // afterwards taps nothing (Shift disturbed the tap) and completes
-        // no pair.
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(press(&mut m, Key::MetaLeft, T + 50), None);
@@ -975,8 +875,6 @@ mod tests {
 
     #[test]
     fn mod_shift_abandons_a_pending_pair() {
-        // A Shift tap started a pair; Mod+Shift consumes the next Shift
-        // press as Phrase, and the following lone press starts fresh.
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
@@ -1008,7 +906,6 @@ mod tests {
             scancode: 38,
             kind: GestureKind::Word,
         }]);
-        // No modifiers: no bind.
         assert_eq!(m.bind(38, T), None);
         mod_meta(&mut m, T + 10);
         let g = m.bind(38, T + 20);
@@ -1019,7 +916,6 @@ mod tests {
                 undo: false
             })
         );
-        // Unconfigured scancode: no bind.
         assert_eq!(m.bind(30, T + 30), None);
         release(&mut m, Key::MetaLeft, T + 40);
     }
@@ -1053,10 +949,7 @@ mod tests {
             kind: GestureKind::Phrase,
         }]);
         mod_meta(&mut m, T);
-        // Shift missing: no bind.
         assert_eq!(m.bind(38, T + 10), None);
-        // The Shift press itself is the Mod+Shift phrase chord; the bind
-        // right after counts as its repeat (shared gesture chain).
         assert_eq!(
             press(&mut m, Key::ShiftLeft, T + 20),
             Some(Gesture {
@@ -1137,7 +1030,6 @@ mod tests {
         });
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
-        // Past the default 400 ms, inside the configured 1000 ms.
         let g = press(&mut m, Key::ShiftLeft, T + 600);
         assert!(matches!(
             g,

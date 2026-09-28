@@ -1,11 +1,4 @@
 //! niri IPC client: layout index reads, index switches, event barrier.
-//!
-//! Hardware-dependent: needs `$NIRI_SOCKET` (i.e. running inside niri).
-//! Opens two connections because an event-stream connection never takes
-//! further requests: one long-lived event stream plus one request socket.
-//! Layout switches always name an explicit index, never next/prev.
-//!
-//! [`event_is_layout`] is pure and unit-tested; the rest needs a compositor.
 
 use niri_ipc::{
     Action, Event, KeyboardLayouts, LayoutSwitchTarget, Request, Response, socket::Socket,
@@ -13,35 +6,25 @@ use niri_ipc::{
 use std::io;
 use std::time::Duration;
 
-/// Base delay for IPC reconnect backoff; doubles per attempt, capped.
+/// Base delay for IPC reconnect backoff.
 pub const RECONNECT_BASE_MS: u64 = 500;
 /// Backoff never waits longer than this between attempts.
 pub const RECONNECT_MAX_MS: u64 = 10_000;
-/// Reconnect attempts before giving up (then the daemon exits and the
-/// systemd unit restarts it as a last resort).
+/// Reconnect attempts before giving up.
 pub const RECONNECT_ATTEMPTS: u32 = 6;
 
-/// Backoff delay before reconnect `attempt` (0-based): exponential in
-/// [`RECONNECT_BASE_MS`], capped at [`RECONNECT_MAX_MS`].
+/// Backoff delay before reconnect `attempt` (0-based).
 pub fn backoff_delay(attempt: u32) -> Duration {
     let doubled = RECONNECT_BASE_MS.saturating_mul(1u64 << attempt.min(20));
     Duration::from_millis(doubled.min(RECONNECT_MAX_MS))
 }
 
-/// Layout backend: layout index reads, index switches, event barrier. The
-/// production implementation is [`IpcClient`] (needs `$NIRI_SOCKET`); tests
-/// slot in a fake without a compositor.
+/// Layout backend: layout index reads, index switches, event barrier.
 pub trait LayoutBackend {
-    /// Current layout index and configured layout count.
     fn current_layout(&mut self) -> io::Result<(u8, usize)>;
-    /// Switch to `index` by explicit index.
     fn switch_to(&mut self, index: u8) -> io::Result<()>;
-    /// Block until niri reports `target` as active.
     fn wait_for_layout(&mut self, target: u8) -> io::Result<()>;
-    /// Re-establish a dead event stream, then check `target`. See
-    /// [`IpcClient::recover_barrier`].
     fn recover_barrier(&mut self, target: u8) -> io::Result<bool>;
-    /// Id of the focused window, or `None` when no window has focus.
     fn focused_window_id(&mut self) -> io::Result<Option<u64>>;
 }
 
@@ -52,7 +35,6 @@ pub struct IpcClient {
 }
 
 impl IpcClient {
-    /// Connect both sockets and subscribe to the event stream.
     pub fn connect() -> io::Result<Self> {
         let requests = Socket::connect()?;
         let read_event = subscribe_events()?;
@@ -62,9 +44,7 @@ impl IpcClient {
         })
     }
 
-    /// Connect with backoff, for compositor restarts: retry
-    /// [`RECONNECT_ATTEMPTS`] times before giving up (the caller exits and
-    /// the systemd unit restarts the daemon as a last resort).
+    /// Connect with backoff, for compositor restarts.
     pub fn connect_with_retry() -> io::Result<Self> {
         let mut last = io::Error::other("no attempts ran");
         for attempt in 0..RECONNECT_ATTEMPTS {
@@ -86,8 +66,6 @@ impl IpcClient {
     }
 
     /// Full layout state: names in index order plus the current index.
-    /// [`current_layout`](LayoutBackend::current_layout) is the index/count
-    /// projection `doctor` reports.
     pub fn layouts(&mut self) -> io::Result<KeyboardLayouts> {
         match self.requests.send(Request::KeyboardLayouts) {
             Ok(Ok(Response::KeyboardLayouts(layouts))) => Ok(layouts),
@@ -104,14 +82,11 @@ impl IpcClient {
 }
 
 impl LayoutBackend for IpcClient {
-    /// Current layout index and configured layout count.
     fn current_layout(&mut self) -> io::Result<(u8, usize)> {
         let layouts = self.layouts()?;
         Ok((layouts.current_idx, layouts.names.len()))
     }
 
-    /// Id of the focused window (`None` on an empty workspace): the daemon
-    /// scopes the input buffer to one window, so a focus change clears it.
     fn focused_window_id(&mut self) -> io::Result<Option<u64>> {
         match self.requests.send(Request::FocusedWindow) {
             Ok(Ok(Response::FocusedWindow(window))) => Ok(window.map(|w| w.id)),
@@ -126,8 +101,6 @@ impl LayoutBackend for IpcClient {
         }
     }
 
-    /// Switch to `index` by explicit index. Rejects out-of-range u8 upstream;
-    /// the caller passes indices learned from niri itself.
     fn switch_to(&mut self, index: u8) -> io::Result<()> {
         let action = Action::SwitchLayout {
             layout: LayoutSwitchTarget::Index(index),
@@ -145,9 +118,6 @@ impl LayoutBackend for IpcClient {
         }
     }
 
-    /// Block until niri reports `target` as active. Skips unrelated events;
-    /// never sleeps. An I/O error means the event stream died — the caller
-    /// recovers via [`IpcClient::recover_barrier`] instead of exiting.
     fn wait_for_layout(&mut self, target: u8) -> io::Result<()> {
         loop {
             let event = (self.read_event)()?;
@@ -157,11 +127,6 @@ impl LayoutBackend for IpcClient {
         }
     }
 
-    /// Re-establish a dead event stream with backoff, then check whether
-    /// `target` is already active. Returns `Ok(true)` when the barrier is
-    /// satisfied after recovery, `Ok(false)` when the stream is back but
-    /// the layout sits elsewhere, and `Err` when reconnects ran out (the
-    /// caller fails the conversion; exiting stays the last resort).
     fn recover_barrier(&mut self, target: u8) -> io::Result<bool> {
         let mut last = io::Error::other("no attempts ran");
         for attempt in 0..RECONNECT_ATTEMPTS {
@@ -183,8 +148,6 @@ impl LayoutBackend for IpcClient {
     }
 }
 
-/// Subscribe one event-stream connection: the second socket, which never
-/// takes further requests afterwards.
 fn subscribe_events() -> io::Result<Box<dyn FnMut() -> io::Result<Event>>> {
     let mut events = Socket::connect()?;
     match events.send(Request::EventStream) {

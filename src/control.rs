@@ -1,16 +1,4 @@
 //! Control socket: niri-bind subcommands talk to the running daemon.
-//!
-//! The daemon (`run`) binds `$XDG_RUNTIME_DIR/niri-punto.sock` (`$NIRI_PUNTO_SOCKET`
-//! wins when set, for tests and manual runs). `convert-word` / `convert-selection`
-//! connect, send one request line, and print the one-line reply. A second `run`
-//! that finds a live socket exits instead of double-reading input.
-//!
-//! Protocol (one `\n`-terminated line each way):
-//!   client → `convert-word` | `convert-selection`
-//!   daemon → `ok <detail>` | `err <detail>`
-//!
-//! `convert-selection` is accepted by the protocol but answered with an
-//! explicit not-wired error until clipboard logic lands in its own ticket.
 
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
@@ -26,7 +14,6 @@ pub enum ControlKind {
 }
 
 impl ControlKind {
-    /// The request line as sent over the socket, newline included.
     pub fn as_line(self) -> &'static str {
         match self {
             Self::Word => "convert-word\n",
@@ -35,8 +22,6 @@ impl ControlKind {
     }
 }
 
-/// Parse one request line (trailing newline optional, surrounding
-/// whitespace ignored). Unknown commands yield `None`.
 pub fn parse_request(line: &str) -> Option<ControlKind> {
     match line.trim() {
         "convert-word" => Some(ControlKind::Word),
@@ -56,18 +41,11 @@ pub fn socket_path() -> PathBuf {
     env::temp_dir().join("niri-punto.sock")
 }
 
-/// True when a daemon is listening at `path`. A stale socket file with no
-/// listener reads as not live, so the next `run` can reclaim it.
 pub fn is_live(path: &Path) -> bool {
     UnixStream::connect(path).is_ok()
 }
 
 /// Bind the control socket for `run`.
-///
-/// A live socket means a second daemon: refuse with a clear error (this is
-/// the single-instance guard). A stale socket file with no listener is
-/// removed and rebound. A bind race that loses (`AddrInUse`) is reported as
-/// an already-running daemon too.
 pub fn bind(path: &Path) -> io::Result<UnixListener> {
     if is_live(path) {
         return Err(already_running(path));
@@ -90,8 +68,7 @@ fn already_running(path: &Path) -> io::Error {
     ))
 }
 
-/// Ask the running daemon for one conversion. Returns the raw reply line
-/// without the trailing newline (`ok ...` or `err ...`).
+/// Ask the running daemon for one conversion.
 pub fn send(path: &Path, kind: ControlKind) -> io::Result<String> {
     let stream = UnixStream::connect(path).map_err(|error| {
         io::Error::new(
@@ -115,7 +92,7 @@ pub struct ControlRequest {
 fn read_request_line(stream: &UnixStream) -> Option<String> {
     let mut line = String::new();
     match BufReader::new(stream).read_line(&mut line) {
-        Ok(0) => None, // client went away without asking
+        Ok(0) => None,
         Ok(_) => Some(line),
         Err(_) => None,
     }
@@ -126,12 +103,7 @@ fn write_reply(stream: &UnixStream, message: &str) {
     let _ = writeln!(stream, "{message}");
 }
 
-/// Serve a single connection: read one request line, then either answer
-/// directly (unknown command, selection stub, daemon busy) or forward a
-/// word request to the main loop and relay its answer. Runs on the listener
-/// thread; the conversion itself stays on the main loop with the buffer.
-/// Returns whether a request line was consumed (false on EOF probes, e.g.
-/// the [`is_live`] check of a second `run`, so accept loops can skip them).
+/// Serve a single connection.
 pub fn serve_one(stream: UnixStream, requests: &Sender<ControlRequest>) -> bool {
     let Some(line) = read_request_line(&stream) else {
         return false;
@@ -141,11 +113,7 @@ pub fn serve_one(stream: UnixStream, requests: &Sender<ControlRequest>) -> bool 
         return true;
     };
     if kind == ControlKind::Selection {
-        // Accepted by the protocol; conversion logic is another ticket's lane.
-        write_reply(
-            &stream,
-            "err selection conversion is not wired yet (see ticket 09)",
-        );
+        write_reply(&stream, "err selection conversion is not wired yet");
         return true;
     }
     let (tx, rx) = std::sync::mpsc::channel::<String>();
@@ -200,8 +168,6 @@ mod tests {
     #[test]
     fn socket_path_override_wins_for_tests() {
         let prior = env::var_os("NIRI_PUNTO_SOCKET");
-        // SAFETY: no other test reads `NIRI_PUNTO_SOCKET`, and the prior
-        // value is restored before returning.
         unsafe {
             env::set_var("NIRI_PUNTO_SOCKET", "/tmp/niri-punto-test-override.sock");
         }
@@ -241,7 +207,6 @@ mod tests {
 
         let mut client = client;
         client.write_all(b"convert-word\n").unwrap();
-        // The main loop side: receives the kind, answers like a conversion.
         let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
         assert_eq!(request.kind, ControlKind::Word);
         request
@@ -261,7 +226,6 @@ mod tests {
         let mut client = client;
         client.write_all(b"convert-selection\n").unwrap();
         assert!(recv_line(&client).starts_with("err "));
-        // Nothing reaches the main loop.
         assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
         thread.join().unwrap();
     }
@@ -287,21 +251,17 @@ mod tests {
 
         let listener = bind(&path).unwrap();
         assert!(is_live(&path));
-        // A second bind refuses: the single-instance guard.
         assert!(bind(&path).is_err());
 
         let (tx, rx) = channel::<ControlRequest>();
         let thread = std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
-                // Probes (e.g. the is_live check above) connect and go away
-                // without a line; only a consumed request ends the test.
                 if serve_one(stream, &tx) {
                     break;
                 }
             }
         });
-        // The main loop side answers; the client gets the relayed line.
         let relay = std::thread::spawn(move || {
             let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
             request.reply.send("ok converted".to_string()).unwrap();
@@ -310,7 +270,6 @@ mod tests {
         relay.join().unwrap();
         thread.join().unwrap();
 
-        // Missing daemon reads as a clear client error.
         let missing = test_socket("missing-10");
         assert!(send(&missing, ControlKind::Word).is_err());
         let _ = std::fs::remove_file(&path);

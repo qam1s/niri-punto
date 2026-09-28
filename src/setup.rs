@@ -1,14 +1,4 @@
 //! `setup`: fresh-machine install without a package manager.
-//!
-//! Everything installs at user level except the udev rule: the binary goes
-//! to `~/.local/bin`, the unit to `~/.config/systemd/user/`, the default
-//! config to `$XDG_CONFIG_HOME/niri-punto/` (never overwriting). Only the
-//! udev-rule step escalates via `sudo`; `--no-udev` skips it and prints the
-//! manual command instead.
-//!
-//! File helpers take explicit paths and are unit-tested against temp dirs;
-//! commands go through [`Runner`] so `--dry-run` and tests observe without
-//! executing.
 
 use crate::config::{self, DEFAULT_CONFIG, MODULES_FILE_NAME, RULE_FILE_NAME};
 use crate::doctor;
@@ -17,14 +7,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// Shipped unit, rule and modules-load entry, embedded so `setup` works
-/// from the bare binary. The same files live under `contrib/` in the
-/// tarball for manual install.
+/// from the bare binary.
 pub const UNIT_SOURCE: &str = include_str!("../contrib/niri-punto.service");
 pub const RULE_SOURCE: &str = include_str!("../contrib/70-niri-punto.rules");
 pub const MODULES_SOURCE: &str = include_str!("../contrib/niri-punto.conf");
 
-/// Rule name shipped by 0.1.0, removed on upgrade: it sorted after stock
-/// `71-seat`/`73-seat-late`, so tagged devices never got a seat or an ACL.
+/// Old rule name, removed on upgrade.
 pub const STALE_RULE_DEST: &str = "/etc/udev/rules.d/99-niri-punto.rules";
 
 pub const SERVICE_FILE_NAME: &str = "niri-punto.service";
@@ -39,13 +27,9 @@ pub struct Options {
 /// Resolved install locations.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Paths {
-    /// `~/.local/bin`.
     pub bin_dir: PathBuf,
-    /// `~/.config/systemd/user/niri-punto.service`.
     pub unit_path: PathBuf,
-    /// `$XDG_CONFIG_HOME/niri-punto/config.kdl`.
     pub config_path: PathBuf,
-    /// The running binary (copy source).
     pub exe: PathBuf,
 }
 
@@ -75,7 +59,7 @@ pub fn resolve() -> io::Result<Paths> {
     Ok(paths_for(&home, xdg.as_deref(), exe))
 }
 
-/// One external command. Display renders the shell-ish form.
+/// One external command.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Command {
     pub prog: String,
@@ -122,10 +106,6 @@ impl Runner for RealRunner {
     }
 }
 
-/// True when both paths name the same file (device+inode, following
-/// symlinks). Re-running `setup` from the installed binary must skip the
-/// copy: a running executable cannot be opened O_TRUNC (`ETXTBSY`), and the
-/// copy would be a no-op anyway. A missing path is never "the same".
 pub fn is_same_file(first: &Path, second: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     match (std::fs::metadata(first), std::fs::metadata(second)) {
@@ -134,8 +114,6 @@ pub fn is_same_file(first: &Path, second: &Path) -> bool {
     }
 }
 
-/// Copy the running binary to `~/.local/bin`, creating the dir and
-/// preserving executability.
 pub fn install_binary(exe: &Path, dest: &Path) -> io::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -147,7 +125,6 @@ pub fn install_binary(exe: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Write the shipped user unit, creating the dir.
 pub fn install_unit(dest: &Path) -> io::Result<()> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -156,8 +133,6 @@ pub fn install_unit(dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Write the default config unless one already exists. Returns true when
-/// the file was created; an existing file is never touched.
 pub fn write_default_config(dest: &Path) -> io::Result<bool> {
     if dest.exists() {
         return Ok(false);
@@ -169,14 +144,11 @@ pub fn write_default_config(dest: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Contrib file shipped next to the binary in the tarball layout, if present.
 fn shipped_contrib(exe: &Path, name: &str) -> Option<PathBuf> {
     let candidate = exe.parent()?.join("contrib").join(name);
     candidate.is_file().then_some(candidate)
 }
 
-/// Stage embedded text so `sudo install` (or the manual command) has a
-/// source path even outside the tarball layout.
 fn stage_embedded(dir: &Path, name: &str, content: &str) -> io::Result<PathBuf> {
     std::fs::create_dir_all(dir)?;
     let path = dir.join(name);
@@ -184,8 +156,6 @@ fn stage_embedded(dir: &Path, name: &str, content: &str) -> io::Result<PathBuf> 
     Ok(path)
 }
 
-/// Resolve a shipped-or-staged source: tarball file wins, embedded staging
-/// is fallback.
 fn file_source(exe: &Path, staging_dir: &Path, name: &str, embedded: &str) -> io::Result<PathBuf> {
     if let Some(shipped) = shipped_contrib(exe, name) {
         return Ok(shipped);
@@ -193,23 +163,19 @@ fn file_source(exe: &Path, staging_dir: &Path, name: &str, embedded: &str) -> io
     stage_embedded(staging_dir, name, embedded)
 }
 
-/// Rule shipped next to the binary in the tarball layout, if present.
 pub fn shipped_rule_src(exe: &Path) -> Option<PathBuf> {
     shipped_contrib(exe, RULE_FILE_NAME)
 }
 
-/// Resolve the rule source: shipped file wins, embedded staging is fallback.
 pub fn rule_source(exe: &Path, staging_dir: &Path) -> io::Result<PathBuf> {
     file_source(exe, staging_dir, RULE_FILE_NAME, RULE_SOURCE)
 }
 
-/// Resolve the modules-load source: shipped file wins, embedded staging is
-/// fallback.
 pub fn modules_source(exe: &Path, staging_dir: &Path) -> io::Result<PathBuf> {
     file_source(exe, staging_dir, MODULES_FILE_NAME, MODULES_SOURCE)
 }
 
-/// User-level daemon reload + enable. No privilege involved.
+/// User-level daemon reload + enable.
 pub fn user_commands() -> Vec<Command> {
     vec![
         Command::new("systemctl", &["--user", "daemon-reload"]),
@@ -220,11 +186,7 @@ pub fn user_commands() -> Vec<Command> {
     ]
 }
 
-/// The escalated udev step: drop the stale 0.1.0 rule name, install the
-/// rule and the modules-load entry, load the driver now, reload, trigger.
-/// The trigger replays `add` scoped to input+misc: already-present devices
-/// become readable without a reboot or replug, and a freshly modprobed
-/// uinput gets tagged in the same pass.
+/// The escalated udev step.
 pub fn udev_commands(rule_src: &Path, modules_src: &Path) -> Vec<Command> {
     let rule = rule_src.to_string_lossy().to_string();
     let modules = modules_src.to_string_lossy().to_string();
@@ -259,7 +221,6 @@ pub fn manual_udev_command(rule_src: &Path, modules_src: &Path) -> String {
         .join(" && ")
 }
 
-/// Warn when the binary dir is not on `$PATH`.
 pub fn path_warning(bin_dir: &Path) -> Option<String> {
     let on_path = std::env::var_os("PATH")
         .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir == bin_dir));
@@ -271,7 +232,6 @@ pub fn path_warning(bin_dir: &Path) -> Option<String> {
     })
 }
 
-/// Staging dir for the embedded rule fallback.
 pub fn staging_dir() -> PathBuf {
     std::env::temp_dir().join("niri-punto-setup")
 }
@@ -309,7 +269,6 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
         }
     }
 
-    // Dry run resolves the source paths without staging files.
     let rule_src = if options.dry_run {
         shipped_rule_src(&paths.exe).unwrap_or_else(|| staging_dir().join(RULE_FILE_NAME))
     } else {
@@ -366,7 +325,7 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
     0
 }
 
-/// Run one external step: print on dry runs, delegate otherwise.
+/// Run one external step.
 fn exec(runner: &dyn Runner, dry_run: bool, command: &Command) -> io::Result<()> {
     if dry_run {
         println!("[dry-run] {command}");
@@ -375,10 +334,6 @@ fn exec(runner: &dyn Runner, dry_run: bool, command: &Command) -> io::Result<()>
     runner.run(command)
 }
 
-/// The deepest ancestor of `path` (or `path` itself) that is a symlink
-/// whose target does not resolve — e.g. a dotfiles layout pointing at a
-/// missing dir. Explains otherwise cryptic `create_dir_all` failures
-/// (`EEXIST` on the dangling link).
 fn dangling_symlink_on_path(path: &Path) -> Option<(PathBuf, PathBuf)> {
     let mut current: &Path = path;
     loop {
@@ -391,8 +346,6 @@ fn dangling_symlink_on_path(path: &Path) -> Option<(PathBuf, PathBuf)> {
         current = current.parent()?;
     }
 }
-/// Print a `name: dest` line and run the file step (or its dry-run echo).
-/// Returns false after reporting a failure.
 fn step(name: &str, dest: &Path, dry_run: bool, install: impl FnOnce() -> io::Result<()>) -> bool {
     if dry_run {
         println!("[dry-run] install {name} -> {}", dest.display());
@@ -481,8 +434,6 @@ mod tests {
     fn embedded_rule_grants_uaccess() {
         assert!(RULE_SOURCE.contains("uaccess"));
         assert!(RULE_SOURCE.contains("SUBSYSTEM==\"input\""));
-        // The daemon injects through /dev/uinput (root-only by default,
-        // tagged by no stock rule): without this line it exits on start.
         assert!(RULE_SOURCE.contains("KERNEL==\"uinput\""));
     }
 
@@ -544,8 +495,6 @@ mod tests {
         let runner = FakeRunner::new();
         assert_eq!(run(Options::default(), &paths, &runner), 0);
         let installed = paths.bin_dir.join("niri-punto");
-        // A read-only destination proves the skip: a copy attempt would
-        // fail, and on a live system the running binary reports ETXTBSY.
         let mut permissions = std::fs::metadata(&installed).unwrap().permissions();
         permissions.set_mode(0o444);
         std::fs::set_permissions(&installed, permissions).unwrap();
@@ -611,8 +560,6 @@ mod tests {
         assert!(manual.contains("sudo modprobe uinput"));
         assert!(manual.contains(STALE_RULE_DEST));
         assert!(manual.contains("udevadm control --reload-rules"));
-        // Add (not change) events are what make logind write uaccess ACLs
-        // onto already-present devices (no reboot/replug needed).
         assert!(manual.contains("--action=add"));
         assert!(manual.contains("--subsystem-match=input"));
         assert!(manual.contains("--subsystem-match=misc"));
@@ -650,7 +597,7 @@ mod tests {
             DEFAULT_CONFIG
         );
         let commands = runner.commands.borrow();
-        assert_eq!(commands.len(), 8); // 6 udev (sudo) + 2 user systemctl
+        assert_eq!(commands.len(), 8);
         assert!(commands[..6].iter().all(|command| command.prog == "sudo"));
         assert!(
             commands[6..]

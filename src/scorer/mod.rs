@@ -1,22 +1,4 @@
 //! Content-based direction verdict for manual conversion.
-//!
-//! Renders remembered scancodes under both layouts, scores each rendering
-//! with that language's bigram model ([`tables`]), and verdicts the intended
-//! layout. Declines (falls back to today's `current_layout` behavior) when
-//! short or below the margin.
-//!
-//! Tuning (wider corpus, 199 cases, zero confident-wrong): confident when
-//! the average-log-prob gap reaches [`CONFIDENCE_MARGIN`] (2.6 per bigram)
-//! with at least [`MIN_LETTERS`] (3) scorable characters (letters and
-//! spaces). Latin input that scores strongly Us (`khorosho`, `api`,
-//! `spasibo`, …) verdicts Us rather than declining: the buffer was typed
-//! in the US layout, so a Us verdict is a no-op, while declining would risk
-//! Cyrillic conversion after an external layout switch.
-//!
-//! Not wired into any conversion path yet: nothing calls [`verdict`] outside
-//! tests, and the [`Detector`](crate::detector::Detector) seam keeps serving
-//! `ManualOnly`. The direction wiring calls [`verdict`] (intended layout +
-//! confidence); the rejected `score() -> Option<f32>` shape stays out.
 
 mod tables;
 
@@ -26,17 +8,10 @@ use crate::config::LayoutPair;
 /// Minimum average-log-prob gap per bigram for a confident verdict.
 pub const CONFIDENCE_MARGIN: f32 = 2.6;
 
-/// Inputs with fewer scorable characters (letters and spaces) decline.
+/// Inputs with fewer scorable characters decline.
 pub const MIN_LETTERS: usize = 3;
 
-/// Canonical scancode table: evdev scancode -> (US-side char, RU-side char)
-/// for letters, space, and the punctuation covered by the selection path.
-/// Digits are layout-invariant and skipped by scoring.
-///
-/// One source for [`render`] and both inverses below, so the arms cannot
-/// drift. This is a scancode table, so it cannot reuse the char pairs in
-/// [`crate::keymaps`]: those map pasted text for the selection path, while
-/// scoring must start from raw scancodes before any layout applies.
+/// Canonical scancode table: evdev scancode -> (US-side char, RU-side char).
 const SCANCODE_TABLE: &[(u16, char, char)] = &[
     (16, 'q', 'й'),
     (17, 'w', 'ц'),
@@ -90,9 +65,6 @@ fn index_of(symbols: &str, ch: char) -> Option<usize> {
     symbols.chars().position(|c| c == ch)
 }
 
-/// Count the characters scoring can see: letters and spaces. Digits and
-/// punctuation never enter the bigram sequence; spaces do (the tuning
-/// counts them too, so this shape is load-bearing for the margin).
 fn scorable_chars(us_text: &str) -> usize {
     us_text
         .chars()
@@ -100,10 +72,8 @@ fn scorable_chars(us_text: &str) -> usize {
         .count()
 }
 
-/// Average log-prob per bigram over the letter/boundary sequence.
-/// Returns `None` when fewer than 2 bigrams are scorable.
 fn score(text: &str, symbols: &str, table: &[f32], n: usize) -> Option<f32> {
-    let mut seq = vec![0usize]; // leading boundary
+    let mut seq = vec![0usize];
     for mut ch in text.chars().flat_map(|c| c.to_lowercase()) {
         if ch == ' ' {
             ch = '^';
@@ -112,7 +82,7 @@ fn score(text: &str, symbols: &str, table: &[f32], n: usize) -> Option<f32> {
             seq.push(i);
         }
     }
-    seq.push(0); // trailing boundary
+    seq.push(0);
     if seq.len() < 3 {
         return None;
     }
@@ -124,12 +94,6 @@ fn score(text: &str, symbols: &str, table: &[f32], n: usize) -> Option<f32> {
 }
 
 /// Synthesize buffer entries for selection text the daemon never typed.
-///
-/// Each letter maps back to the scancode whose layout side carries it
-/// (Latin to the US side, Cyrillic to the RU side), so [`verdict`] scores
-/// the selection exactly as if its keystrokes had been remembered. Only
-/// letters and space affect scoring (the bigram symbols are letters plus
-/// the boundary); anything else is skipped.
 pub fn entries_from_text(text: &str) -> Vec<BufferEntry> {
     let mut out = Vec::new();
     for ch in text.chars() {
@@ -158,8 +122,6 @@ pub fn entries_from_text(text: &str) -> Vec<BufferEntry> {
     out
 }
 
-/// Inverse of [`render`] over the US side (letters only: the selection
-/// synthesis skips every other ASCII character).
 fn scancode_for_us(en: char) -> Option<u16> {
     if !en.is_ascii_alphabetic() {
         return None;
@@ -170,8 +132,6 @@ fn scancode_for_us(en: char) -> Option<u16> {
         .map(|(scancode, _, _)| *scancode)
 }
 
-/// Inverse of [`render`] over the RU side (letters only, same as above;
-/// `ё` shares `е`'s scancode).
 fn scancode_for_ru(ru: char) -> Option<u16> {
     if ru == 'ё' {
         return Some(20);
@@ -188,9 +148,6 @@ pub enum Intended {
 }
 
 impl Intended {
-    /// Pair position of the intended layout, resolved through the pair
-    /// order: the Latin side holds `Us`, the Cyrillic side `Ru` (so a
-    /// `layout ru,us` config verdicts the opposite positions from `us,ru`).
     pub fn index_in(self, pair: &LayoutPair) -> u8 {
         let latin = pair.latin_index();
         match self {
@@ -207,8 +164,6 @@ pub enum Verdict {
 }
 
 /// Verdict the intended layout for buffer entries, or decline.
-/// Confident only past [`CONFIDENCE_MARGIN`] with [`MIN_LETTERS`] scorable
-/// characters; anything else declines to today's `current_layout` behavior.
 pub fn verdict(entries: &[BufferEntry]) -> Verdict {
     let mut us_text = String::new();
     let mut ru_text = String::new();
@@ -221,11 +176,6 @@ pub fn verdict(entries: &[BufferEntry]) -> Verdict {
     verdict_rendered(&us_text, &ru_text)
 }
 
-/// Verdict two same-keystroke renderings: the US-layout text and the
-/// RU-layout text for identical scancodes. [`verdict`] renders buffer
-/// entries; the selection path renders clipboard text via
-/// [`entries_from_text`] and calls [`verdict`] instead, so both paths share
-/// one scoring core.
 fn verdict_rendered(us_text: &str, ru_text: &str) -> Verdict {
     if scorable_chars(us_text) < MIN_LETTERS {
         return Verdict::Decline;
@@ -250,9 +200,6 @@ fn verdict_rendered(us_text: &str, ru_text: &str) -> Verdict {
 mod tests {
     use super::*;
 
-    /// Inverse for tests: us text -> buffer entries. Letters delegate to
-    /// the production inverse so the arms cannot drift; punctuation and
-    /// space rows stay local (scaffolding for inputs scoring skips).
     fn keys(us_text: &str) -> Vec<BufferEntry> {
         let mut out = Vec::new();
         for ch in us_text.chars() {
@@ -281,8 +228,6 @@ mod tests {
         out
     }
 
-    /// Scancodes for text typed while the RU layout was active. Same split:
-    /// letters delegate, punctuation stays local.
     fn keys_ru(ru_text: &str) -> Vec<BufferEntry> {
         let mut out = Vec::new();
         for ch in ru_text.chars().flat_map(|c| c.to_lowercase()) {
@@ -337,7 +282,7 @@ mod tests {
             &[
                 "ghbdtn",
                 "Ghj,ktvf",
-                "Ghbdtn rfr ltkf", // user's sentence
+                "Ghbdtn rfr ltkf",
                 "Ghjuhfvvbhjdfybz",
                 "cnfdrb",
                 "cgfcb,j",
@@ -369,7 +314,6 @@ mod tests {
 
     #[test]
     fn ru_weak_declines() {
-        // Russian, but below the margin: decline is safe (fallback).
         assert_verdict(
             &[
                 "aeyrwbz",      // функция
@@ -437,7 +381,7 @@ mod tests {
                 "commit",
                 "import",
                 "export",
-                "match", // weakest Us-confident
+                "match",
                 "value",
                 "output",
                 "for",
@@ -470,9 +414,6 @@ mod tests {
 
     #[test]
     fn latin_input_us_confident() {
-        // Latin input typed in the US layout: Us verdicts are
-        // no-ops, so confidence here is safe (a decline would risk Cyrillic
-        // conversion after an external layout switch). See module docs.
         assert_verdict(
             &[
                 "spasibo",
@@ -492,7 +433,6 @@ mod tests {
 
     #[test]
     fn us_weak_declines() {
-        // English-leaning but below the margin: decline is safe (fallback).
         assert_verdict(
             &[
                 "open a pull request",
@@ -533,8 +473,6 @@ mod tests {
 
     #[test]
     fn hostile_tech_declines() {
-        // Abbreviations / tokens hostile to bigram scoring: all decline,
-        // none reach confidence in either direction.
         assert_verdict(
             &[
                 "http", "https", "dns", "url", "yaml", "html", "src", "lib", "bin", "etc", "cfg",
@@ -560,8 +498,6 @@ mod tests {
 
     #[test]
     fn ambiguous_latin_declines() {
-        // Latin input scoring near the source language: all below the
-        // margin.
         assert_verdict(
             &[
                 "privet",
@@ -576,8 +512,6 @@ mod tests {
 
     #[test]
     fn mixed_language_buffers_decline() {
-        // Whole-buffer phrase scope scores mixed content as mush: decline to
-        // today's behavior. Acceptable; narrower scopes stay out of scope.
         for (us, ru) in [
             ("hello ", "мир"),
             ("switch ", "окно"),
@@ -594,7 +528,6 @@ mod tests {
 
     #[test]
     fn selection_synthesis_matches_remembered_keystrokes() {
-        // Latin selections verdict like the scancodes that would type them.
         for case in ["ghbdtn", "hello", "privet", "hi", ""] {
             assert_eq!(
                 verdict(&entries_from_text(case)),
@@ -602,7 +535,6 @@ mod tests {
                 "{case}"
             );
         }
-        // Cyrillic selections verdict like scancodes typed under RU.
         for case in ["привет", "мир", "окно"] {
             assert_eq!(
                 verdict(&entries_from_text(case)),
@@ -610,8 +542,6 @@ mod tests {
                 "{case}"
             );
         }
-        // Unscorable characters never contribute: digits, emoji, and
-        // punctuation synthesize to nothing (or to inert spaces).
         assert!(entries_from_text("123👋").is_empty());
         assert_eq!(
             verdict(&entries_from_text("ghbdtn 👋")),
@@ -621,7 +551,7 @@ mod tests {
 
     #[test]
     fn scoring_is_fast_enough_for_the_trigger_path() {
-        let entries = keys(&"ghbdtn ".repeat(32)); // 224-entry buffer
+        let entries = keys(&"ghbdtn ".repeat(32));
         let start = std::time::Instant::now();
         for _ in 0..100 {
             let _ = verdict(&entries);

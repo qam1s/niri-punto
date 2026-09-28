@@ -1,15 +1,4 @@
 //! KDL config: the ordered layout pair and its file location.
-//!
-//! The core is one node in `$XDG_CONFIG_HOME/niri-punto/config.kdl`:
-//!
-//! ```kdl
-//! layout "us" "ru"
-//! ```
-//!
-//! Position in the pair maps to the niri layout index, so the order must
-//! match the `layout` line in the niri config. Parsing and validation are
-//! pure and unit-tested; only the path helpers and file reads touch the
-//! environment.
 
 use crate::reader;
 use crate::trigger::{Bind, GestureKind, ModSet, TimingConfig};
@@ -19,18 +8,11 @@ use std::path::{Path, PathBuf};
 
 /// Default config written by `setup`. Never overwrites an existing file.
 pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pair: position maps to the niri
-// layout index, so the order must match the `layout` line in your niri
-// config. `setup` never overwrites this file once created.
 layout "us" "ru"
-// Daemon-side binds in niri style: no niri binds needed. A bare `Mod`
-// is the lone-tap scope (`off` disables the tap); hand-added combos are
-// modifiers-held-plus-key. Phrase needs no bind: Mod+Shift (Mod first)
-// converts on Mod release (mirroring the gesture table in README).
 binds {
     Mod word
     Double-Shift selection
 }
-// Trigger timings in milliseconds: absent keys mean these defaults.
 timings {
     double-shift-ms 400
     undo-ms 3000
@@ -40,10 +22,7 @@ timings {
 }
 "#;
 
-/// File name of the udev rule, shared with `setup` and `doctor`. The `70-`
-/// prefix is load-bearing: it must sort before stock `71-seat` (derives
-/// the seat tag from `uaccess`) and `73-seat-late` (queues the ACL
-/// builtin); a `99-*` name tags devices too late and no ACL is written.
+/// File name of the udev rule, shared with `setup` and `doctor`.
 pub const RULE_FILE_NAME: &str = "70-niri-punto.rules";
 
 /// File name of the modules-load entry that pulls in `uinput` at boot.
@@ -57,7 +36,6 @@ pub struct LayoutPair {
 }
 
 impl LayoutPair {
-    /// Validate two codes: non-empty and distinct.
     pub fn new(first: &str, second: &str) -> Result<Self, ConfigError> {
         if first.is_empty() || second.is_empty() {
             return Err(ConfigError::EmptyCode);
@@ -71,7 +49,6 @@ impl LayoutPair {
         })
     }
 
-    /// Code at pair position `index` (0 or 1); `None` for anything else.
     pub fn get(&self, index: u8) -> Option<&str> {
         match index {
             0 => Some(&self.first),
@@ -80,10 +57,6 @@ impl LayoutPair {
         }
     }
 
-    /// Pair position holding the Latin layout (`layout ru,us` is legal, so
-    /// callers must not assume position 0). The base subtag names the
-    /// language; a code from the Cyrillic set puts Latin second, anything
-    /// else keeps today's first-is-Latin behavior.
     pub fn latin_index(&self) -> u8 {
         if is_cyrillic_layout(&self.first) {
             1
@@ -93,8 +66,6 @@ impl LayoutPair {
     }
 }
 
-/// Whether an xkb layout code names a Cyrillic-script layout, compared
-/// case-insensitively on the base subtag (`ru`, not `ru+phonetic`).
 fn is_cyrillic_layout(code: &str) -> bool {
     let base: String = code
         .chars()
@@ -110,29 +81,17 @@ fn is_cyrillic_layout(code: &str) -> bool {
 /// Why a config could not be loaded or understood.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ConfigError {
-    /// The file is not valid KDL.
     Parse(String),
-    /// No `layout` node present.
     MissingLayouts,
-    /// More than one `layout` node present.
     DuplicateNode,
-    /// The node does not hold exactly two layout codes.
     BadArity { found: usize },
-    /// A code is empty or both codes are identical.
     EmptyCode,
-    /// Both codes are identical.
     Duplicate(String),
-    /// The `tap` node was replaced by a bare-`Mod` bind.
     BadTap(String),
-    /// A `binds` entry is malformed (combo or action).
     BadBind(String),
-    /// The `layouts` node was renamed to `layout`.
     RenamedLayouts,
-    /// The `double-shift` node holds a bad action.
     BadDoubleShift(String),
-    /// The `timings` block is malformed (keys or values).
     BadTimings(String),
-    /// File I/O failed (missing file, permissions).
     Io(String),
 }
 
@@ -173,8 +132,7 @@ impl From<io::Error> for ConfigError {
     }
 }
 
-/// Parse config text into the layout pair. Unknown nodes are ignored so
-/// later tickets can extend the file without breaking old binaries.
+/// Parse config text into the layout pair.
 pub fn parse(text: &str) -> Result<LayoutPair, ConfigError> {
     let document: kdl::KdlDocument = text
         .parse()
@@ -194,9 +152,6 @@ pub fn parse(text: &str) -> Result<LayoutPair, ConfigError> {
     if layout.next().is_some() {
         return Err(ConfigError::DuplicateNode);
     }
-    // Strict shape: exactly two positional string arguments, no
-    // properties. Anything else is almost certainly a typo, so report
-    // the entry count rather than guessing.
     if node.entries().len() != 2 {
         return Err(ConfigError::BadArity {
             found: node.entries().len(),
@@ -219,8 +174,7 @@ pub fn parse(text: &str) -> Result<LayoutPair, ConfigError> {
 }
 
 /// Trigger settings from the `binds` block, the optional `double-shift`
-/// node, and the `timings` block. Missing nodes mean defaults (tap on as
-/// word, plain pair as word, no binds), so old config files keep working.
+/// node, and the `timings` block.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct TriggerSettings {
     /// Lone-Mod-tap scope from a bare-`Mod` bind; `None` disables the tap.
@@ -241,7 +195,7 @@ impl Default for TriggerSettings {
     }
 }
 
-/// Parse trigger settings. Unknown nodes are ignored, like in [`parse`].
+/// Parse trigger settings.
 pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
     let document: kdl::KdlDocument = text
         .parse()
@@ -265,8 +219,6 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
                 binds_seen = true;
                 parse_binds(node, &mut settings)?;
             }
-            // `chord` lines died in favor of the `binds` block: fail loudly
-            // instead of silently dropping the user's triggers.
             "chord" => {
                 return Err(ConfigError::BadBind(
                     "`chord` lines were replaced by the `binds` block (e.g. `binds { Mod+L word }`)".to_string(),
@@ -357,8 +309,7 @@ fn parse_binds(node: &kdl::KdlNode, settings: &mut TriggerSettings) -> Result<()
     Ok(())
 }
 
-/// One parsed `binds` line: a single bind, a modifier-key pair, the tap,
-/// or the plain-pair scope.
+/// One parsed `binds` line.
 enum BindLine {
     Bind(Bind),
     Binds(Bind, Bind),
@@ -366,10 +317,6 @@ enum BindLine {
     PairBase(GestureKind),
 }
 
-/// One bind: the node name is the niri-style combo (`Mod+L`,
-/// `Mod+Shift+P`), the single argument is the action. A bare `Mod` is
-/// the lone-tap scope (`off` disables the tap); a modifier as the key
-/// (`Mod+Shift`) expands to both side scancodes.
 fn parse_bind(node: &kdl::KdlNode) -> Result<BindLine, ConfigError> {
     let action = match node_args(node).as_deref() {
         Some([action]) => *action,
@@ -386,12 +333,10 @@ fn parse_bind(node: &kdl::KdlNode) -> Result<BindLine, ConfigError> {
         return Err(ConfigError::BadBind(format!("bad combo {combo:?}")));
     };
     if parts.is_empty() {
-        // `double-shift` lives here too, next to the other gestures.
         if key.eq_ignore_ascii_case("double-shift") {
             let kind = parse_action(action).map_err(ConfigError::BadBind)?;
             return Ok(BindLine::PairBase(kind));
         }
-        // Bare key name: only a lone Mod is a tap.
         if !key.eq_ignore_ascii_case("mod") {
             return Err(ConfigError::BadBind(format!(
                 "bad combo {combo:?}: need at least one modifier (e.g. `Mod+L`), or lone `Mod` for tap"
@@ -467,9 +412,6 @@ fn single_int(node: &kdl::KdlNode) -> Option<i128> {
     }
 }
 
-/// Parse the `timings` block. Absent keys mean defaults; unknown keys,
-/// duplicates, and non-integer values are errors (a typoed number must
-/// not silently apply).
 fn parse_timings(node: &kdl::KdlNode) -> Result<TimingConfig, ConfigError> {
     if !node.entries().is_empty() {
         return Err(ConfigError::BadTimings(
@@ -523,8 +465,6 @@ fn parse_timings(node: &kdl::KdlNode) -> Result<TimingConfig, ConfigError> {
     Ok(timing)
 }
 
-/// Config path for explicit homes. Pure: the env-reading wrapper is
-/// [`config_path`].
 pub fn config_path_for(home: &Path, xdg_config_home: Option<&str>) -> PathBuf {
     let base = match xdg_config_home {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
@@ -533,8 +473,6 @@ pub fn config_path_for(home: &Path, xdg_config_home: Option<&str>) -> PathBuf {
     base.join("niri-punto").join("config.kdl")
 }
 
-/// `$XDG_CONFIG_HOME/niri-punto/config.kdl`, falling back to
-/// `~/.config/niri-punto/config.kdl`.
 pub fn config_path() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -570,7 +508,6 @@ fn read_text(path: &Path) -> Result<String, ConfigError> {
         .map_err(|error| ConfigError::Io(format!("cannot read {}: {error}", path.display())))
 }
 
-/// Name the file in content errors, so a bad line is findable.
 fn with_path(path: &Path, error: ConfigError) -> ConfigError {
     match error {
         ConfigError::Parse(_)
@@ -697,8 +634,6 @@ mod tests {
         assert_eq!(LayoutPair::new("ru", "us").unwrap().latin_index(), 1);
         assert_eq!(LayoutPair::new("de", "ru").unwrap().latin_index(), 0);
         assert_eq!(LayoutPair::new("ru", "de").unwrap().latin_index(), 1);
-        // Case and variant spellings still resolve; unknown codes keep
-        // today's first-is-Latin behavior.
         assert_eq!(LayoutPair::new("RU", "US").unwrap().latin_index(), 1);
         assert_eq!(
             LayoutPair::new("us", "ru+phonetic").unwrap().latin_index(),
@@ -741,9 +676,6 @@ mod tests {
 
     #[test]
     fn readme_example_parses_to_readme_mapping() {
-        // Mirror of the Config example in README.md: word on Mod tap,
-        // selection on Double Shift, no Mod combos (phrase is the
-        // both-Shifts pair, not a bind).
         let settings = parse_settings(
             "layout \"us\" \"ru\"\nbinds {\n Mod word\n double-shift selection\n}\ntimings {\n double-shift-ms 400\n undo-ms 3000\n debounce-ms 30\n pending-ms 2000\n tap-ms 300\n}\n",
         )

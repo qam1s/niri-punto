@@ -1,16 +1,9 @@
-//! Remembered input: a log of (scancode, shift) buffer entries.
-//!
-//! The daemon replays scancodes rather than characters, so the buffer stores
-//! raw scancodes plus whether Shift was held — everything a later replay
-//! needs, without any layout knowledge. Word boundaries are decided by the
-//! caller through a predicate, keeping this module free of key-code tables.
+//! Remembered input: a log of (scancode, shift) entries.
 
-/// One unit of remembered input: a raw scancode plus Shift state.
+/// One unit of remembered input.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BufferEntry {
-    /// Raw evdev key scancode (e.g. the code behind `KEY_A`).
     pub scancode: u16,
-    /// Whether Shift was held when the key was pressed.
     pub shift: bool,
 }
 
@@ -18,14 +11,10 @@ pub struct BufferEntry {
 pub struct InputBuffer {
     entries: Vec<BufferEntry>,
     capacity: usize,
-    /// Layout index when the first entry after a clear arrived (`None`
-    /// while empty): anchors the external-switch check — a confident
-    /// verdict only overrides the current layout when the layout moved
-    /// since typing.
+    /// Layout index when the first entry after a clear arrived.
     birth_layout: Option<u8>,
 }
 
-/// Default bound: far more than any word or phrase replay needs.
 pub const DEFAULT_CAPACITY: usize = 256;
 
 impl InputBuffer {
@@ -37,24 +26,16 @@ impl InputBuffer {
         }
     }
 
-    /// Record the layout the current fill was typed under. Sticks while
-    /// entries remain (later switches do not move it); [`clear`](Self::clear)
-    /// resets it for the next fill.
     pub fn note_birth(&mut self, layout: u8) {
         if self.birth_layout.is_none() {
             self.birth_layout = Some(layout);
         }
     }
 
-    /// Layout recorded by [`note_birth`](Self::note_birth), if any fill
-    /// has started since the last clear.
     pub fn birth_layout(&self) -> Option<u8> {
         self.birth_layout
     }
 
-    /// Move the anchor to `layout` after a successful apply: the replayed
-    /// text now matches that layout, so later fills must not inherit the
-    /// pre-conversion anchor (the buffer itself stays frozen for undo).
     pub fn reanchor(&mut self, layout: u8) {
         self.birth_layout = Some(layout);
     }
@@ -67,9 +48,6 @@ impl InputBuffer {
         self.entries.push(entry);
     }
 
-    /// Mirror a Backspace press: drop the most recent entry. No-op when
-    /// empty; the birth anchor resets with the fill so a fully-erased
-    /// word does not inherit a stale layout.
     pub fn pop(&mut self) {
         self.entries.pop();
         if self.entries.is_empty() {
@@ -77,8 +55,6 @@ impl InputBuffer {
         }
     }
 
-    /// Mirror Ctrl+Backspace: drop the trailing word (the suffix after
-    /// the last boundary), keeping earlier fills intact.
     pub fn pop_word(&mut self, is_boundary: impl Fn(u16) -> bool) {
         let cut = self
             .entries
@@ -97,8 +73,6 @@ impl InputBuffer {
         self.birth_layout = None;
     }
 
-    // `len`/`entries` are the read seam for tickets 09/10 (selection,
-    // phrase); unused by the word-only loop of ticket 08.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -109,8 +83,6 @@ impl InputBuffer {
         &self.entries
     }
 
-    /// Entries since the last boundary (the current word): the suffix after
-    /// the most recent entry matching `is_boundary`.
     pub fn trailing_word(&self, is_boundary: impl Fn(u16) -> bool) -> &[BufferEntry] {
         let cut = self
             .entries
@@ -121,9 +93,6 @@ impl InputBuffer {
         &self.entries[cut..]
     }
 
-    /// Whole-buffer scope for phrase conversion: everything remembered
-    /// since the last [`clear`](Self::clear), including word boundaries.
-    /// Bounded by Esc-clear and capacity eviction, never by word edges.
     pub fn phrase(&self) -> &[BufferEntry] {
         &self.entries
     }
@@ -146,7 +115,7 @@ mod tests {
         }
     }
 
-    const SPACE: u16 = 57; // stand-in boundary scancode for tests
+    const SPACE: u16 = 57;
 
     fn is_boundary(code: u16) -> bool {
         code == SPACE
@@ -189,7 +158,7 @@ mod tests {
             buf.push(entry(code));
         }
         assert_eq!(buf.trailing_word(is_boundary), &[]);
-        assert_eq!(buf.len(), 2); // history kept for phrase scope
+        assert_eq!(buf.len(), 2);
     }
 
     #[test]
@@ -198,7 +167,6 @@ mod tests {
         for code in [30, 48, SPACE, 31, 32] {
             buf.push(entry(code));
         }
-        // The word scope sees only the suffix; the phrase scope everything.
         assert_eq!(buf.trailing_word(is_boundary).len(), 2);
         let phrase: Vec<u16> = buf.phrase().iter().map(|e| e.scancode).collect();
         assert_eq!(phrase, vec![30, 48, SPACE, 31, 32]);
@@ -256,7 +224,6 @@ mod tests {
         assert_eq!(buf.birth_layout(), None);
         buf.note_birth(1);
         buf.push(entry(30));
-        // A later switch does not move the anchor.
         buf.note_birth(0);
         assert_eq!(buf.birth_layout(), Some(1));
         buf.clear();

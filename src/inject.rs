@@ -1,19 +1,11 @@
 //! uinput injector: erase with Backspace, replay recorded scancodes.
-//!
-//! Hardware-dependent: needs `/dev/uinput` access (see the udev rule in a
-//! later ticket). Everything layout-independent lives in the pure
-//! [`erase_strokes`]/[`replay_strokes`] builders, unit-tested below; only
-//! [`Injector`] touches the device.
-//!
-//! The virtual device is created with exactly [`OWN_DEVICE_NAME`], so the
-//! reader keeps excluding the daemon's own keys from the buffer.
 
 use crate::buffer::BufferEntry;
 use crate::reader::OWN_DEVICE_NAME;
 use evdev::{AttributeSet, KeyCode, KeyEvent, uinput::VirtualDevice};
 use std::io;
 
-/// One key transition to emit: press (`value` 1) or release (0).
+/// One key transition to emit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct KeyStroke {
     pub scancode: u16,
@@ -34,8 +26,6 @@ pub fn erase_strokes(count: usize) -> Vec<KeyStroke> {
     out
 }
 
-/// Press/release pairs for `entries`, driving a virtual Shift around shifted
-/// entries. Consecutive shifted entries share one Shift hold.
 pub fn replay_strokes(entries: &[BufferEntry]) -> Vec<KeyStroke> {
     let shift = KeyCode::KEY_LEFTSHIFT.code();
     let mut out = Vec::with_capacity(entries.len() * 2 + 2);
@@ -65,9 +55,7 @@ pub fn replay_strokes(entries: &[BufferEntry]) -> Vec<KeyStroke> {
     out
 }
 
-/// Press/release pairs for Ctrl+V: paste the clipboard over the selection.
-/// The selection path publishes the converted text with `wl-copy` first, so
-/// a plain Ctrl+V replaces the highlighted text with it.
+/// Press/release pairs for Ctrl+V.
 pub fn paste_strokes() -> Vec<KeyStroke> {
     let ctrl = KeyCode::KEY_LEFTCTRL.code();
     let paste = KeyCode::KEY_V.code();
@@ -91,26 +79,19 @@ pub fn paste_strokes() -> Vec<KeyStroke> {
     ]
 }
 
-/// A sink for key transitions: erase, replay, paste. The production
-/// implementation is [`Injector`] (needs `/dev/uinput`); tests slot in a
-/// recording fake without hardware.
+/// A sink for key transitions: erase, replay, paste.
 pub trait Emitter {
-    /// Delete `count` characters with Backspace.
     fn erase(&mut self, count: usize) -> io::Result<()>;
-    /// Replay recorded scancodes so they render in the new layout.
     fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()>;
-    /// Paste the clipboard over the selection.
     fn paste(&mut self) -> io::Result<()>;
 }
 
-/// uinput device that emits corrections. Open once, reuse across gestures.
+/// uinput device that emits corrections.
 pub struct Injector {
     device: VirtualDevice,
 }
 
 impl Injector {
-    /// Create the virtual device named exactly `niri-punto`. Advertises the
-    /// full key-code range so any recorded scancode replays.
     pub fn open() -> io::Result<Self> {
         let mut keys = AttributeSet::<KeyCode>::new();
         for code in 0..0x300 {
@@ -131,19 +112,14 @@ impl Injector {
         Ok(())
     }
 
-    /// Delete `count` characters with Backspace.
     pub fn erase(&mut self, count: usize) -> io::Result<()> {
         self.emit_all(&erase_strokes(count))
     }
 
-    /// Replay recorded scancodes so they render in the new layout. Call only
-    /// after the layout-changed barrier fired.
     pub fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()> {
         self.emit_all(&replay_strokes(entries))
     }
 
-    /// Paste the clipboard (published via `wl-copy`) over the selection.
-    /// Call only after the layout-changed barrier fired.
     pub fn paste(&mut self) -> io::Result<()> {
         self.emit_all(&paste_strokes())
     }

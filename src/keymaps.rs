@@ -1,37 +1,12 @@
 //! Symbol tables for selection conversion, generated at build time.
-//!
-//! The scancode-replay path (tickets 08/10) needs no tables: it re-emits the
-//! same scancodes after the layout switches. The clipboard path of ticket 09
-//! cannot replay — the selection may be any Unicode the daemon never typed —
-//! so it maps the pasted text char-by-char to the other layout instead.
-//!
-//! The tables come from `xkbcli compile-keymap` for the pair's layouts
-//! (default `us,ru`, see `NIRI_PUNTO_XKB_LAYOUTS` in `build.rs`): the build
-//! script bakes the compiled keymap into `OUT_DIR`, and
-//! [`parse_xkbcli_keymap`] reads group 1 (Latin) vs group 2 (Cyrillic) per
-//! key and level. When xkbcli is absent the baked keymap is empty and the
-//! static [`PAIRS`] fallback applies, so the build never depends on the tool.
-//!
-//! [`convert`] maps both directions: `from_ru == false` is EN->RU (current
-//! layout is US), `from_ru == true` is RU->EN.
 
 use std::sync::OnceLock;
 
-/// The keymap baked by `build.rs`: xkbcli output, or empty when xkbcli was
-/// unavailable (the static fallback applies then).
+/// The keymap baked by `build.rs`.
 const BAKED_KEYMAP: &str = include_str!(concat!(env!("OUT_DIR"), "/xkb_keymap.xkb"));
 
 /// One bidirectional character pair: US QWERTY position <-> RU JCUKEN glyph.
-///
-/// Lowercase letters and unshifted punctuation are listed; uppercase letters
-/// derive via case folding (Unicode-aware, 1:1 for Cyrillic). Shifted symbols
-/// that have no case relation (`{`, `<`, `@`, …) are listed explicitly.
-///
-/// This is the static fallback when no xkbcli-baked table exists; anything
-/// outside the active table passes through unchanged, so emoji and
-/// third-language text survive the round trip byte-identical.
 const PAIRS: &[(char, char)] = &[
-    // Lowercase letters, row by row.
     ('q', 'й'),
     ('w', 'ц'),
     ('e', 'у'),
@@ -58,7 +33,6 @@ const PAIRS: &[(char, char)] = &[
     ('b', 'и'),
     ('n', 'т'),
     ('m', 'ь'),
-    // Unshifted punctuation.
     ('[', 'х'),
     (']', 'ъ'),
     (';', 'ж'),
@@ -67,7 +41,6 @@ const PAIRS: &[(char, char)] = &[
     ('.', 'ю'),
     ('/', '.'),
     ('`', 'ё'),
-    // Shifted punctuation and the digit row (no case relation).
     ('{', 'Х'),
     ('}', 'Ъ'),
     (':', 'Ж'),
@@ -94,13 +67,9 @@ fn lookup_ru(pairs: &[(char, char)], glyph: char) -> Option<char> {
 
 fn map_char_in(pairs: &[(char, char)], ch: char, from_ru: bool) -> char {
     if from_ru {
-        // Exact pairs first: shifted symbols have no case relation, so
-        // case-folding their uppercase Cyrillic side would lose them
-        // (',' has no uppercase; Б must map back to '<', not ',').
         if let Some(mapped) = lookup_ru(pairs, ch) {
             return mapped;
         }
-        // Uppercase Cyrillic derives from the lowercase pair: Й -> й -> q -> Q.
         let mut folded = ch.to_lowercase();
         if let (Some(lower), None) = (folded.next(), folded.next())
             && lower != ch
@@ -113,7 +82,6 @@ fn map_char_in(pairs: &[(char, char)], ch: char, from_ru: bool) -> char {
         if let Some(mapped) = lookup_en(pairs, ch) {
             return mapped;
         }
-        // Uppercase Latin derives the same way: Q -> q -> й -> Й.
         if ch.is_ascii_uppercase() {
             return lookup_en(pairs, ch.to_ascii_lowercase())
                 .map(|mapped| mapped.to_uppercase().next().unwrap_or(mapped))
@@ -124,30 +92,21 @@ fn map_char_in(pairs: &[(char, char)], ch: char, from_ru: bool) -> char {
 }
 
 /// Map `text` char-by-char to the other layout of the active table.
-/// `from_ru == false` converts EN->RU, `from_ru == true` RU->EN.
-/// Unmapped characters (digits, emoji, third-language text, whitespace) pass
-/// through unchanged.
 pub fn convert(text: &str, from_ru: bool) -> String {
     convert_in(active_pairs(), text, from_ru)
 }
 
-/// Same as [`convert`] but over an explicit table (for tests and callers
-/// holding a parsed keymap).
 fn convert_in(pairs: &[(char, char)], text: &str, from_ru: bool) -> String {
     text.chars()
         .map(|ch| map_char_in(pairs, ch, from_ru))
         .collect()
 }
 
-/// The active table: the xkbcli-generated pairs when the build baked a
-/// keymap, else the static fallback.
 fn active_pairs() -> &'static [(char, char)] {
     static ACTIVE: OnceLock<Vec<(char, char)>> = OnceLock::new();
     ACTIVE.get_or_init(|| resolve_pairs(parse_xkbcli_keymap(BAKED_KEYMAP)))
 }
 
-/// Prefer the generated table; an empty parse (no xkbcli at build time)
-/// selects the static fallback.
 fn resolve_pairs(generated: Vec<(char, char)>) -> Vec<(char, char)> {
     if generated.is_empty() {
         PAIRS.to_vec()
@@ -157,13 +116,6 @@ fn resolve_pairs(generated: Vec<(char, char)>) -> Vec<(char, char)> {
 }
 
 /// Parse an `xkbcli compile-keymap` dump into (latin, cyrillic) pairs.
-///
-/// Per key block, group 1 is the Latin side and group 2 the Cyrillic side;
-/// each level (unshifted, shifted) whose two sides resolve to different
-/// printable characters becomes a pair. Identical sides (digits, `-_=`)
-/// and unresolvable symbols (modifiers, `NoSymbol`) contribute nothing, so
-/// malformed or unexpected dumps parse to an empty table and the caller
-/// falls back.
 pub fn parse_xkbcli_keymap(text: &str) -> Vec<(char, char)> {
     let mut pairs = Vec::new();
     let mut first: Option<Vec<String>> = None;
@@ -202,8 +154,6 @@ pub fn parse_xkbcli_keymap(text: &str) -> Vec<(char, char)> {
 
 /// The symbol list of one `symbols[N]= [...]` line.
 fn symbols_in(line: &str) -> Vec<String> {
-    // Skip past the `symbols[N]=` prefix first: it holds brackets of its
-    // own (`[1]`), which are not the list brackets.
     let after_eq = line.split('=').nth(1).unwrap_or("");
     let (Some(start), Some(end)) = (after_eq.find('['), after_eq.rfind(']')) else {
         return Vec::new();
@@ -214,10 +164,6 @@ fn symbols_in(line: &str) -> Vec<String> {
         .collect()
 }
 
-/// Resolve one xkbcli keysym name to a character: single ASCII letters and
-/// digits directly, common named punctuation via table, `Cyrillic_*` via
-/// table (uppercase variants derive from the lowercase entry), `Uxxxx`
-/// Unicode escapes directly. Anything else (modifiers, `NoSymbol`) is `None`.
 fn keysym_to_char(name: &str) -> Option<char> {
     if let Some(rest) = name.strip_prefix("Cyrillic_") {
         let lower = rest.to_lowercase();
@@ -394,7 +340,7 @@ mod tests {
         assert_eq!(convert(&convert(cyrillic, true), false), cyrillic);
     }
 
-    /// Canned `xkbcli compile-keymap` fragment in the real multi-line shape.
+    /// Canned `xkbcli compile-keymap` fragment.
     const SAMPLE: &str = "\
 \tkey <AD01>               {
 \t\tsymbols[1]= [               q,               Q ],
@@ -416,9 +362,6 @@ mod tests {
 
     #[test]
     fn xkbcli_sample_parses_to_letter_and_shifted_pairs() {
-        // Both levels differ: unshifted (q, й) and shifted (Q, Й), plus
-        // the shifted digit-row pair ($, ;). The identical unshifted
-        // digit level (4, 4) contributes nothing.
         assert_eq!(
             parse_xkbcli_keymap(SAMPLE),
             vec![('q', 'й'), ('Q', 'Й'), ('$', ';')]
@@ -427,8 +370,6 @@ mod tests {
 
     #[test]
     fn xkbcli_identical_and_modifier_sides_are_skipped() {
-        // AE09 contributes nothing (identical sides); LFSH contributes
-        // nothing (Shift_L/ISO_Next_Group unresolvable).
         let pairs = parse_xkbcli_keymap(SAMPLE);
         assert!(!pairs.iter().any(|(en, _)| *en == '9'));
         assert!(!pairs.iter().any(|(en, _)| *en == '\\'));

@@ -1,20 +1,4 @@
 //! niri-punto: keyboard layout corrector daemon for the niri compositor.
-//!
-//! Ticket 08 (word conversion): read real key presses, and on Double Shift
-//! erase the last word via uinput, switch the layout by explicit index over
-//! niri IPC, wait for the layout-changed event, then replay the same
-//! scancodes. Repeating the gesture undoes the conversion.
-//! Ticket 09 (selection): on Ctrl+DoubleShift read the primary selection via
-//! `wl-paste`, map it char-by-char to the other layout, publish it with
-//! `wl-copy`, switch the layout by index, wait for the layout-changed event,
-//! then paste over the selection with Ctrl+V. Repeating the gesture undoes.
-//! Ticket 10 (phrase + binds): Shift+DoubleShift converts the phrase (whole
-//! buffer) through shared convert helpers, and the `run` daemon also serves
-//! `convert-word` / `convert-selection` requests from niri binds over its
-//! control socket.
-//! Ticket 11 (setup + doctor): `setup` installs the binary, user unit,
-//! default KDL config, and the udev rule; `doctor` checks devices,
-//! permissions, socket, and layouts; the daemon loads the layout pair.
 
 mod buffer;
 mod clipboard;
@@ -27,7 +11,6 @@ mod inject;
 mod ipc;
 mod keymaps;
 mod reader;
-// Bigram scorer for direction verdicts behind the detector seam.
 mod scorer;
 mod selection;
 mod setup;
@@ -65,10 +48,6 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
-/// Erase, switch by index, wait for the layout-changed event, then replay.
-/// The buffer stays frozen (see [`convert`]); only the [`Converter`] state
-/// advances, which the caller already updated. Returns false when any step
-/// failed (each failure is already logged); bind replies use it.
 fn apply_plan(
     ipc: &mut impl LayoutBackend,
     injector: &mut impl Emitter,
@@ -92,13 +71,8 @@ fn apply_plan(
     true
 }
 
-/// Wait for the layout barrier, recovering a dead event stream with
-/// backoff first (compositor restarts must not kill conversions).
-/// When the target is already active the barrier passes without touching
-/// the stream: niri emits no event for staying put, so waiting would wedge
-/// the daemon mid-conversion with the user's text already erased (a later
-/// layout switch would then fire the stale plan over current field text).
-/// Returns true when the barrier is satisfied; every failure is logged.
+/// When the target is already active the barrier passes without waiting:
+/// niri emits no event for staying put.
 fn wait_for_barrier(ipc: &mut impl LayoutBackend, target: u8) -> bool {
     if let Ok((current, _)) = ipc.current_layout() {
         if current == target {
@@ -124,14 +98,6 @@ fn wait_for_barrier(ipc: &mut impl LayoutBackend, target: u8) -> bool {
     }
 }
 
-/// Fresh conversion of `entries`, shared by gestures and bind requests.
-/// `phrase` is the whole buffer: the detector verdicts its scope, so an
-/// external layout switch between typing and triggering cannot divert the
-/// hop target. A confident verdict converts toward the intended layout,
-/// except when the layout has not moved since typing and the verdict
-/// agrees with it (see [`Converter::convert_toward`]); a decline keeps
-/// today's `current_layout` behavior. Returns the one-line detail for
-/// daemon logs and socket replies.
 fn do_convert(
     entries: &[BufferEntry],
     phrase: &[BufferEntry],
@@ -161,11 +127,6 @@ fn do_convert(
     Ok(detail)
 }
 
-/// Fresh selection conversion, shared by the gesture and bind requests.
-/// Like [`do_convert`], a confident verdict on the selection text converts
-/// toward the intended layout (hop target and alphabet mapping); a decline
-/// keeps today's `current_layout` behavior.
-/// Returns the one-line detail for daemon logs and socket replies.
 fn do_convert_selection(
     selection_converter: &mut SelectionConverter,
     converter: &mut Converter,
@@ -192,14 +153,11 @@ fn do_convert_selection(
         plan.converted.chars().count(),
         plan.hop.target
     );
-    // A fresh selection conversion supersedes a pending word undo: "repeat"
-    // only undoes the immediately preceding conversion.
     converter.invalidate();
     apply_selection_plan(ipc, injector, clipboard, &plan)?;
     Ok(detail)
 }
 
-/// Undo the last conversion; `None` when there is nothing to undo.
 fn do_undo(
     converter: &mut Converter,
     ipc: &mut impl LayoutBackend,
@@ -214,11 +172,6 @@ fn do_undo(
     Some(detail)
 }
 
-/// Publish the converted text, switch by index, wait for the layout-changed
-/// event, then paste over the selection. Neither converter advances here;
-/// the caller already updated the selection converter. Mirrors
-/// [`apply_plan`]: each failure is logged and returned, so bind replies
-/// report it instead of an unconditional Ok.
 fn apply_selection_plan(
     ipc: &mut impl LayoutBackend,
     injector: &mut impl Emitter,
@@ -248,7 +201,6 @@ fn apply_selection_plan(
 
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
-    // The bare invocation still starts the daemon.
     let (command, rest) = match raw.first().map(String::as_str) {
         None | Some("--input-dir") | Some("--config") => ("run", raw.as_slice()),
         Some("run")
@@ -317,8 +269,6 @@ fn main() {
     }
 }
 
-/// One-shot client for niri binds: send the request to the running daemon
-/// and report its one-line reply. Never starts a daemon.
 fn client(kind: ControlKind) {
     let path = control::socket_path();
     match control::send(&path, kind) {
@@ -337,8 +287,6 @@ fn client(kind: ControlKind) {
 }
 
 fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
-    // Single-instance guard first: a live socket means another daemon owns
-    // the input, so exit before touching hardware.
     let socket_path = control::socket_path();
     let listener = match control::bind(&socket_path) {
         Ok(listener) => listener,
@@ -425,14 +373,9 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new(pair.clone());
     let mut selection_converter = SelectionConverter::new(pair);
-    // Gestures and bind requests wait here while modifiers are physically
-    // held: replaying under a held Shift/Ctrl would render uppercase text
-    // (or app shortcuts). Fires on release, see `handle_key`.
     let mut pending: Option<PendingGesture> = None;
     let detector = BigramDetector;
     let mut clipboard = clipboard::WlClipboard;
-    // Window-focus tracking: the input buffer belongs to one window (see
-    // `note_focus`). `None` until the first successful query.
     let mut last_focus: Option<Option<u64>> = None;
     let mut focus_broken = false;
     eprintln!(
@@ -443,12 +386,6 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     loop {
         match reader.poll(&input_dir, CONTROL_POLL) {
             reader::Poll::Gone => {
-                // Evdev-missing path: keyboards unplugged or not yet
-                // present. Never exit here — hotplug rescans in poll pick
-                // up reappearing devices. Sleep to avoid spinning on a
-                // disconnected channel. (Distinct from the IPC-missing
-                // path above, which retries with backoff and only then
-                // exits for systemd to restart.)
                 eprintln!("input: no devices left; waiting for hotplug");
                 std::thread::sleep(CONTROL_POLL);
             }
@@ -496,11 +433,6 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     }
 }
 
-/// One niri-bind request: convert now, or stage into the wait-for-release
-/// slot while modifiers are physically held. A bind fires with its own
-/// modifier still down (Mod in Mod+L): replaying under it would render
-/// uppercase text or app shortcuts, so it waits like a gesture, bound by
-/// the same timeout.
 fn handle_control(
     request: ControlRequest,
     now_ms: u64,
@@ -545,8 +477,6 @@ fn handle_control(
                 &mut **injector,
             ) {
                 Ok(detail) => {
-                    // Bind conversions supersede a pending selection
-                    // undo, same as the gesture path.
                     selection_converter.invalidate();
                     if let Some(target) = converter.last_target() {
                         buffer.reanchor(target);
@@ -579,12 +509,6 @@ fn handle_control(
     let _ = request.reply.send(answer);
 }
 
-/// Mutable daemon state threaded through key handling (keeps `handle_key`
-/// within the argument-count lint). The detector verdicts the conversion
-/// direction at the gesture decision point (ADR-0006): confident verdicts
-/// set the hop target, declines keep the `current_layout` behavior.
-/// `I`/`L`/`C` are the hardware seams (uinput, niri IPC, clipboard):
-/// production passes the real types, tests pass fakes.
 struct Daemon<'a, I: Emitter, L: LayoutBackend, C: Clipboard> {
     triggers: &'a mut TriggerMachine,
     buffer: &'a mut InputBuffer,
@@ -596,13 +520,6 @@ struct Daemon<'a, I: Emitter, L: LayoutBackend, C: Clipboard> {
     clipboard: &'a mut C,
 }
 
-/// Window-focus tracking: the input buffer belongs to one window, so a
-/// focus change clears it, cancels pending undos, and drops a staged
-/// gesture (the same "context moved on" rule as new physical input).
-/// Without this, typing in the browser then triggering in the terminal
-/// replays foreign scancodes there. Runs before each key event and each
-/// niri-bind request. A failed query keeps the old state; outages log
-/// once until queries succeed again.
 fn note_focus(
     daemon: &mut Daemon<impl Emitter, impl LayoutBackend, impl Clipboard>,
     last_focus: &mut Option<Option<u64>>,
@@ -640,9 +557,6 @@ fn handle_key(
     handle_key_at(raw, start.elapsed().as_millis() as u64, daemon, pending);
 }
 
-/// Key handling at an explicit timestamp. Production passes wall-clock time
-/// via [`handle_key`]; tests pass scripted times to stay clear of the
-/// 30 ms debounce window without sleeping.
 fn handle_key_at(
     raw: reader::RawKey,
     now_ms: u64,
@@ -661,28 +575,16 @@ fn handle_key_at(
     } = daemon;
     let key = reader::classify(raw.scancode);
 
-    // Daemon-side binds (config `binds` block): the bind key is the
-    // trigger, not text — unlike niri-bind keys it skips the buffer, so
-    // the converted scope stays exact.
     let bind = (raw.value == 1)
         .then(|| triggers.bind(raw.scancode, now_ms))
         .flatten();
     if let Some(gesture) = bind {
-        // Latest gesture wins: it supersedes anything still waiting.
         *pending = Some(triggers.stage(gesture, now_ms));
     } else if reader::is_typing_key(key, raw.value) {
-        // New physical input cancels a pending undo: "repeat" only undoes
-        // an immediately preceding conversion. It also cancels a gesture
-        // still waiting for modifiers: the context moved on.
         converter.invalidate();
         selection_converter.invalidate();
         *pending = None;
         if reader::is_backspace(raw.scancode) {
-            // Mirror the screen edit instead of recording it: a plain
-            // Backspace drops one entry per press and per autorepeat,
-            // Ctrl+Backspace drops the trailing word. Recording the
-            // Backspace scancode itself desyncs erase/replay from the
-            // visible text (a stale prefix on the next conversion).
             if triggers.ctrl_held() {
                 buffer.pop_word(reader::is_word_boundary);
             } else {
@@ -692,12 +594,7 @@ fn handle_key_at(
             && !triggers.shift_held()
             && reader::is_copy_key(raw.scancode)
         {
-            // Plain Ctrl+C / Ctrl+Insert: moves no text and no cursor,
-            // so the history survives — but there is nothing to record.
         } else if reader::is_navigation(raw.scancode) {
-            // The cursor moved (or text changed ahead of it): the buffer
-            // no longer describes the screen, so drop it rather than
-            // corrupt the next conversion. Refusing beats mangling.
             buffer.clear();
             if raw.value == 1 {
                 eprintln!("buffer: cleared (cursor moved)");
@@ -708,23 +605,11 @@ fn handle_key_at(
             || triggers.menu_alt_held()
             || triggers.ctrl_held()
         {
-            // Action keys and app/compositor shortcuts (select-all, cut,
-            // paste, undo, Alt+letter menus, Mod+letter actions, CapsLock
-            // with its unmodellable case flip): the text, the selection,
-            // or the case semantics changed behind our back, so drop the
-            // history. Only CapsLock and F-keys reach this as bare
-            // presses; the rest arrive with a modifier held. Right Alt
-            // (AltGr) is excluded on purpose: it produces text.
             buffer.clear();
             if raw.value == 1 {
                 eprintln!("buffer: cleared (shortcut or action key)");
             }
         } else {
-            // Anchor the fill to the layout it is typed under (one IPC
-            // query per fill): a confident verdict only overrides the
-            // current layout when the layout moved since typing
-            // (external switch). Only recorded text anchors — edits,
-            // shortcuts, and cursor moves carry no layout of their own.
             if buffer.birth_layout().is_none() {
                 if let Ok((current, _)) = ipc.current_layout() {
                     buffer.note_birth(current);
@@ -741,8 +626,6 @@ fn handle_key_at(
                     ));
                 }
             } else {
-                // Autorepeat: the character repeats on screen, so it
-                // repeats in the buffer too.
                 buffer.push(reader::buffer_entry_for(
                     raw.scancode,
                     triggers.shift_held(),
@@ -753,9 +636,6 @@ fn handle_key_at(
 
     let pressed = raw.value != 0;
     if let Some(gesture) = triggers.key(key, pressed, now_ms) {
-        // Latest gesture wins: it supersedes anything still waiting.
-        // A gesture completed on a lone Mod release is a tap: only meta()
-        // returns Some on those events, so the key tells the source.
         let mut staged = triggers.stage(gesture, now_ms);
         staged.tap = !pressed && matches!(key, Key::MetaLeft | Key::MetaRight);
         *pending = Some(staged);
@@ -768,13 +648,9 @@ fn handle_key_at(
         return;
     }
     if !staged.ready(now_ms, triggers.modifiers_free()) {
-        // Shift/Ctrl still physically held: replaying now would render
-        // uppercase text (or app shortcuts for Ctrl). Wait for release.
         *pending = Some(staged);
         return;
     }
-    // Detector seam (ADR-0006): the verdict is consulted inside
-    // `do_convert` / `do_convert_selection`, which pick the hop target.
     match staged.kind {
         GestureKind::Word => {
             if staged.undo && converter.has_pending_undo() {
@@ -787,9 +663,6 @@ fn handle_key_at(
                 return;
             }
             if staged.tap && buffer.phrase().is_empty() {
-                // Lone Mod tap with no text: toggle the layout within the
-                // pair instead of converting. Repeat toggles back, so no
-                // undo bookkeeping is needed.
                 match ipc.current_layout() {
                     Ok((current, _)) => {
                         let target = if current == 0 { 1 } else { 0 };
@@ -813,9 +686,6 @@ fn handle_key_at(
                 &mut **injector,
             ) {
                 Ok(detail) => {
-                    // A fresh word conversion supersedes a pending
-                    // selection undo: "repeat" only undoes the
-                    // immediately preceding conversion.
                     selection_converter.invalidate();
                     if let Some(target) = converter.last_target() {
                         buffer.reanchor(target);
@@ -899,7 +769,6 @@ mod tests {
     use evdev::KeyCode;
     use std::io;
 
-    /// Recording uinput stand-in: no `/dev/uinput`, just the call log.
     #[derive(Default)]
     struct FakeEmitter {
         erases: Vec<usize>,
@@ -924,8 +793,6 @@ mod tests {
         }
     }
 
-    /// Niri stand-in: no `$NIRI_SOCKET`. Switches flip the reported index,
-    /// so the layout barrier passes immediately.
     struct FakeLayouts {
         current: u8,
         count: usize,
@@ -970,7 +837,6 @@ mod tests {
         }
     }
 
-    /// In-memory clipboard: no Wayland, no `wl-copy`/`wl-paste`.
     struct FakeClipboard {
         text: String,
         written: Vec<String>,
@@ -1003,10 +869,7 @@ mod tests {
     const KEY_X: u16 = KeyCode::KEY_X.code();
     const KEY_V: u16 = KeyCode::KEY_V.code();
     const KEY_L: u16 = KeyCode::KEY_L.code();
-    /// Mod (Super): held during a Mod+L bind, invisible to the trigger
-    /// machine until the fix.
     const SUPER: u16 = KeyCode::KEY_LEFTMETA.code();
-    /// `ghbdtn`-shaped word: six scancodes, layout-agnostic.
     const WORD: [u16; 6] = [34, 35, 32, 48, 49, 20];
 
     struct Harness {
@@ -1077,8 +940,6 @@ mod tests {
             handle_key_at(raw, self.now, &mut daemon, &mut self.pending);
         }
 
-        /// Run the production focus guard: same call the run loop makes
-        /// before each key event and each niri-bind request.
         fn check_focus(&mut self) {
             let mut daemon = Daemon {
                 triggers: &mut self.triggers,
@@ -1124,8 +985,6 @@ mod tests {
             }
         }
 
-        /// Double Shift with trigger-test spacing (past the 30 ms debounce,
-        /// inside the 400 ms pair window). Fires on the release at `t + 200`.
         fn double_shift(&mut self, t: u64) {
             self.at(t, SHIFT, 1);
             self.at(t + 50, SHIFT, 0);
@@ -1136,10 +995,6 @@ mod tests {
 
     #[test]
     fn barrier_already_at_target_skips_the_event_stream() {
-        // No-op hop (a confident verdict agreeing with the current
-        // layout): niri emits no event for staying put, so waiting would
-        // wedge the daemon mid-conversion with the user's text erased.
-        // The stream is poisoned here: any touch fails, recovery included.
         let mut h = Harness::new();
         h.ipc.stream_dead = true;
         assert!(wait_for_barrier(&mut h.ipc, 0));
@@ -1161,10 +1016,8 @@ mod tests {
         h.type_word(T);
         h.check_focus();
         assert!(!h.buffer.phrase().is_empty());
-        // A conversion leaves a pending undo behind.
         h.double_shift(T + 500);
         assert!(h.converter.has_pending_undo());
-        // A staged gesture waits for release.
         h.pending = Some(h.triggers.stage(
             Gesture {
                 kind: GestureKind::Word,
@@ -1172,12 +1025,10 @@ mod tests {
             },
             h.now,
         ));
-        // Same window: everything survives.
         h.check_focus();
         assert!(!h.buffer.phrase().is_empty());
         assert!(h.converter.has_pending_undo());
         assert!(h.pending.is_some());
-        // Another window: buffer cleared, undo cancelled, staged dropped.
         h.ipc.focus = Some(99);
         h.check_focus();
         assert!(h.buffer.phrase().is_empty());
@@ -1193,7 +1044,6 @@ mod tests {
         h.ipc.focus_err = true;
         h.check_focus();
         assert!(!h.buffer.phrase().is_empty());
-        // Recovery on the same window keeps the buffer too.
         h.ipc.focus_err = false;
         h.check_focus();
         assert!(!h.buffer.phrase().is_empty());
@@ -1219,8 +1069,6 @@ mod tests {
 
     #[test]
     fn backspace_then_retype_converts_only_retyped_word() {
-        // The reported case: type a letter, erase it, type a new word.
-        // The stale prefix must not leak into erase/replay counts.
         let mut h = Harness::new();
         h.tap(T, 38);
         h.tap(T + 100, BACKSPACE);
@@ -1260,8 +1108,6 @@ mod tests {
         h.at(T + 540, CTRL, 0);
         let codes: Vec<u16> = h.buffer.phrase().iter().map(|e| e.scancode).collect();
         assert_eq!(codes, vec![30, 48, 57]);
-        // The trailing word is empty now: the conversion is refused
-        // instead of replaying a stale suffix.
         h.double_shift(T + 900);
         assert!(h.injector.erases.is_empty());
         assert!(h.ipc.switches.is_empty());
@@ -1278,8 +1124,6 @@ mod tests {
 
     #[test]
     fn fn_press_neither_records_nor_breaks_the_gesture() {
-        // Laptop caret moves (Fn+Left is Home): the Fn key itself must
-        // leave no trace in the buffer and no mark on the trigger state.
         let mut h = Harness::new();
         h.type_word(T);
         h.tap(T + 500, FN);
@@ -1298,8 +1142,6 @@ mod tests {
 
     #[test]
     fn ctrl_select_cut_and_paste_clear_the_buffer() {
-        // Ctrl+A/X/V change the selection or the text behind our back:
-        // the history is dropped instead of replayed stale.
         for key in [KEY_A, KEY_X, KEY_V] {
             let mut h = Harness::new();
             h.type_word(T);
@@ -1314,8 +1156,6 @@ mod tests {
 
     #[test]
     fn ctrl_copy_keeps_the_buffer() {
-        // Ctrl+C / Ctrl+Insert move nothing: history survives, and the
-        // shortcut letter itself is not recorded.
         for key in [KEY_C, KeyCode::KEY_INSERT.code()] {
             let mut h = Harness::new();
             h.type_word(T);
@@ -1341,8 +1181,6 @@ mod tests {
 
     #[test]
     fn alt_letter_clears_but_altgr_letter_records() {
-        // Left Alt+letter opens menus: drop the history. Right Alt is
-        // AltGr on many layouts and produces text: record it.
         let mut h = Harness::new();
         h.type_word(T);
         h.at(T + 500, ALT, 1);
@@ -1360,8 +1198,6 @@ mod tests {
 
     #[test]
     fn meta_letter_clears_without_gesturing() {
-        // A compositor shortcut (Mod+letter) is never text: the letter
-        // is dropped, and it voids the lone-Mod tap instead of firing it.
         let mut h = Harness::new();
         h.type_word(T);
         h.at(T + 500, SUPER, 1);
@@ -1372,16 +1208,10 @@ mod tests {
         assert!(h.ipc.switches.is_empty());
     }
 
-    /// `ghbdtn` in true keystroke order (g,h,b,d,t,n): Ru-confident for
-    /// the verdict tests. (WORD above is layout-agnostic replay order,
-    /// which scores differently — bigrams are order-sensitive.)
     const GHBTDN: [u16; 6] = [34, 35, 48, 32, 20, 49];
 
     #[test]
     fn diverged_layout_confident_verdict_converts_toward_intended() {
-        // 18:55 scenario: typed in us, external switch to ru, trigger.
-        // The confident RU verdict converts toward ru instead of toggling
-        // back to us (today's ManualOnly behavior, asserted below).
         let mut h = Harness::with_detector(Box::new(BigramDetector));
         h.type_codes(T, &GHBTDN);
         h.ipc.current = 1;
@@ -1405,9 +1235,6 @@ mod tests {
 
     #[test]
     fn unchanged_layout_agreeing_verdict_flips_for_convert_away() {
-        // Typed under ru, still ru, RU verdict for `ghbdtn` keystrokes: no
-        // external switch happened, so the user converts away — mechanical
-        // flip to us instead of a no-op hop and no-op undos.
         let mut h = Harness::with_detector(Box::new(BigramDetector));
         h.ipc.current = 1;
         h.type_codes(T, &GHBTDN);
@@ -1419,15 +1246,10 @@ mod tests {
 
     #[test]
     fn second_word_after_a_flip_reanchors_and_converts_away() {
-        // Word 1 flips us->ru; the frozen buffer must not keep the stale
-        // birth: word 2 (typed under ru, RU verdict, current ru) flips
-        // back instead of flapping a no-op hop.
         let mut h = Harness::with_detector(Box::new(BigramDetector));
         h.type_codes(T, &GHBTDN);
         h.double_shift(T + 500);
         assert_eq!(h.ipc.switches, vec![1]);
-        // Space plus word 2 under the new layout (typing also retires the
-        // pending undo, so the tap below converts fresh).
         h.at(T + 2000, KeyCode::KEY_SPACE.code(), 1);
         h.at(T + 2010, KeyCode::KEY_SPACE.code(), 0);
         h.type_codes(T + 2100, &GHBTDN);
@@ -1439,12 +1261,10 @@ mod tests {
 
     #[test]
     fn diverged_layout_decline_matches_today_byte_identical() {
-        // "hi" declines (below the margin): the bigram path must erase,
-        // switch, and replay exactly what ManualOnly does today.
         let mut bigram = Harness::with_detector(Box::new(BigramDetector));
         let mut manual = Harness::new();
         for h in [&mut bigram, &mut manual] {
-            h.type_codes(T, &[35, 23]); // h, i
+            h.type_codes(T, &[35, 23]);
             h.ipc.current = 1;
             h.double_shift(T + 500);
         }
@@ -1456,8 +1276,6 @@ mod tests {
 
     #[test]
     fn diverged_layout_confident_selection_converts_toward_intended() {
-        // Clipboard holds us-typed "ghbdtn" while ru is current: the
-        // confident RU verdict maps EN->RU and hops to ru.
         let mut h = Harness::with_detector(Box::new(BigramDetector));
         h.ipc.current = 1;
         h.at(T, CTRL, 1);
@@ -1474,9 +1292,6 @@ mod tests {
 
     #[test]
     fn swapped_pair_diverged_word_converts_toward_the_ru_position() {
-        // `layout ru,us`: the confident RU verdict for `ghbdtn` keystrokes
-        // hops to position 0 even with the diverged current at 1, so the
-        // text and the indicator land together.
         let pair = LayoutPair::new("ru", "us").unwrap();
         let mut h = Harness::with_detector_and_pair(Box::new(BigramDetector), pair);
         h.type_codes(T, &GHBTDN);
@@ -1488,8 +1303,6 @@ mod tests {
 
     #[test]
     fn swapped_pair_diverged_selection_converts_toward_the_ru_position() {
-        // `layout ru,us`: clipboard "ghbdtn" with current at 1 verdicts RU,
-        // writes Cyrillic, and hops to position 0.
         let pair = LayoutPair::new("ru", "us").unwrap();
         let mut h = Harness::with_detector_and_pair(Box::new(BigramDetector), pair);
         h.ipc.current = 1;
@@ -1521,10 +1334,8 @@ mod tests {
         let mut h = Harness::new();
         h.type_word(T);
         h.double_shift(T + 500);
-        // Buffer freezes after conversion, so the trailing word is 6 + 1.
         h.tap(T + 900, 30);
         h.double_shift(T + 1100);
-        // Fresh 7-key word converts from the new layout back.
         assert_eq!(h.ipc.switches, vec![1, 0]);
         assert_eq!(h.injector.erases, vec![6, 7]);
     }
@@ -1546,7 +1357,6 @@ mod tests {
         h.at(T + 100, SHIFT, 0);
         h.at(T + 200, SHIFT, 1);
         h.at(T + 250, SHIFT, 0);
-        // Ctrl still held: the gesture waits for release.
         assert!(h.ipc.switches.is_empty());
         h.at(T + 300, CTRL, 0);
         assert_eq!(h.ipc.switches, vec![1]);
@@ -1558,7 +1368,7 @@ mod tests {
     fn bind_word_while_super_held_defers_until_release() {
         let mut h = Harness::new();
         h.type_word(T);
-        h.at(T + 500, SUPER, 1); // Mod held, as in Mod+L
+        h.at(T + 500, SUPER, 1);
         let now = h.now;
         let (tx, rx) = std::sync::mpsc::channel();
         {
@@ -1592,7 +1402,7 @@ mod tests {
             h.injector.erases
         );
         assert!(h.ipc.switches.is_empty());
-        h.at(T + 600, SUPER, 0); // release Mod: the staged request fires
+        h.at(T + 600, SUPER, 0);
         assert_eq!(h.ipc.switches, vec![1]);
         assert_eq!(h.injector.erases, vec![6]);
     }
@@ -1610,9 +1420,6 @@ mod tests {
 
     #[test]
     fn mod_shift_chord_converts_phrase_on_mod_release() {
-        // Mod first, then Shift: the chord stages on the Shift press and
-        // converts the whole buffer once Mod is released (replaying under
-        // a held Mod would land in the compositor binds).
         let mut h = Harness::new();
         h.type_word(T);
         h.at(T + 500, SUPER, 1);
@@ -1633,11 +1440,9 @@ mod tests {
         h.at(T + 500, SUPER, 1);
         h.at(T + 550, 38, 1);
         h.at(T + 560, 38, 0);
-        // Meta still held: staged, nothing fires yet.
         assert!(h.ipc.switches.is_empty());
         h.at(T + 600, SUPER, 0);
         assert_eq!(h.ipc.switches, vec![1]);
-        // The chord key is the trigger, not text: exactly the typed word.
         assert_eq!(h.injector.erases, vec![6]);
     }
 
@@ -1665,7 +1470,6 @@ mod tests {
         h.at(T + 100, SUPER, 0);
         assert_eq!(h.ipc.switches, vec![1]);
         assert!(h.injector.erases.is_empty());
-        // Repeat toggles back.
         h.at(T + 500, SUPER, 1);
         h.at(T + 600, SUPER, 0);
         assert_eq!(h.ipc.switches, vec![1, 0]);
@@ -1709,7 +1513,6 @@ mod tests {
     fn held_shift_double_shift_converts_phrase() {
         let mut h = Harness::new();
         h.type_word(T);
-        // Phrase gesture: second Shift side while the first stays held.
         h.at(T + 500, SHIFT, 1);
         h.at(T + 550, SHIFT_RIGHT, 1);
         h.at(T + 600, SHIFT_RIGHT, 0);

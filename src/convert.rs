@@ -1,21 +1,4 @@
 //! Pure word conversion: buffer entries in, erase count + layout hop out.
-//!
-//! The daemon replays scancodes rather than characters, so a conversion plan
-//! is just "erase N, switch to index I, replay these entries". This module
-//! computes that plan and tracks the convert/undo chain with no I/O, which
-//! keeps it unit-testable without hardware.
-//!
-//! # Post-conversion buffer policy: freeze, not clear
-//!
-//! After a conversion the [`InputBuffer`](crate::buffer::InputBuffer) is left
-//! unchanged (frozen). Rationale: replay emits the identical scancodes, so
-//! the buffer already describes the converted text; clearing it would lose
-//! the word needed for undo and would turn a later repeat into a no-op
-//! instead of a toggle back. The daemon's own injected keys never re-enter
-//! the buffer because the reader skips the virtual device by exact name
-//! (`niri-punto`). Any new physical typing invalidates the pending undo via
-//! [`Converter::invalidate`], so "repeat the gesture" only undoes an
-//! immediately preceding conversion.
 
 use crate::buffer::BufferEntry;
 use crate::config::LayoutPair;
@@ -26,18 +9,12 @@ use std::fmt;
 /// One conversion step: erase, switch, replay.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ConversionPlan {
-    /// How many Backspaces to emit.
     pub erase: usize,
-    /// Layout hop by explicit index (never next).
     pub hop: LayoutHop,
-    /// Scancodes to replay once the layout-changed event arrives.
     pub replay: Vec<BufferEntry>,
 }
 
 impl Reversible for ConversionPlan {
-    /// The same step in the opposite direction: same erase count and replay
-    /// list, swapped layout hop. Works because replay re-emits identical
-    /// scancodes either way.
     fn reversed(&self) -> Self {
         Self {
             erase: self.erase,
@@ -53,14 +30,10 @@ impl HasHop for ConversionPlan {
     }
 }
 
-/// Why a conversion was refused. Refusals are reported, never applied.
+/// Why a conversion was refused.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ConversionError {
-    /// The trailing word is empty: nothing to erase or replay.
     Empty,
-    /// The current layout is outside the configured pair: either beyond
-    /// the pair positions (a third language) or beyond what niri reports.
-    /// Carries the pair so the report names it instead of guessing.
     Layouts {
         current: u8,
         count: usize,
@@ -88,12 +61,7 @@ impl fmt::Display for ConversionError {
 
 impl std::error::Error for ConversionError {}
 
-/// Plan a conversion of `entries` (usually the trailing word) inside `ctx.
-///
-/// Position in the pair maps to the niri layout index, so the hop is
-/// `1 - current`. With more than two niri layouts conversion still works
-/// inside the pair; anything outside it (a third language) is refused
-/// loudly rather than corrupting text silently.
+/// Plan a conversion of `entries` inside `ctx.
 pub fn plan_conversion(
     entries: &[BufferEntry],
     ctx: LayoutCtx<'_>,
@@ -108,10 +76,7 @@ pub fn plan_conversion(
     })
 }
 
-/// Plan a conversion toward an explicit pair position: the target is a
-/// confident detector verdict's intended layout, ignoring which layout is
-/// current. The empty-word and pair-guard refusals match
-/// [`plan_conversion`] exactly, so a decline falls back byte-identical.
+/// Plan a conversion toward an explicit pair position.
 pub fn plan_conversion_toward(
     entries: &[BufferEntry],
     target: u8,
@@ -127,8 +92,7 @@ pub fn plan_conversion_toward(
     })
 }
 
-/// Tracks the convert/undo chain across gestures: a thin wrapper over the
-/// shared [`UndoChain`] remembering the configured pair for planning.
+/// Tracks the convert/undo chain across gestures.
 pub struct Converter {
     chain: UndoChain<ConversionPlan>,
     pair: LayoutPair,
@@ -161,13 +125,6 @@ impl Converter {
         Ok(plan)
     }
 
-    /// Plan a fresh conversion toward a confident detector verdict's
-    /// intended layout (resolved to a pair position through the pair order)
-    /// and remember it. When the layout has not moved since typing
-    /// (`birth` equals `current`) and the verdict agrees with it, there
-    /// was no external switch: the text already matches the layout and
-    /// the user is converting away, so fall back to the mechanical flip.
-    /// A moved layout (or an unknown birth) trusts the verdict.
     pub fn convert_toward(
         &mut self,
         entries: &[BufferEntry],
@@ -193,24 +150,18 @@ impl Converter {
         Ok(plan)
     }
 
-    /// Whether a repeated gesture has a conversion to undo.
     pub fn has_pending_undo(&self) -> bool {
         self.chain.has_pending_undo()
     }
 
-    /// Hop target of the last remembered step: after a successful apply
-    /// the layout sits there, so the input buffer re-anchors to it.
     pub fn last_target(&self) -> Option<u8> {
         self.chain.last_target()
     }
 
-    /// Undo the last step (or redo the undo, toggling back). Returns `None`
-    /// when [`Converter::invalidate`] ran since, or no conversion happened.
     pub fn undo(&mut self) -> Option<ConversionPlan> {
         self.chain.undo()
     }
 
-    /// New physical input cancels the pending undo.
     pub fn invalidate(&mut self) {
         self.chain.invalidate();
     }
@@ -247,7 +198,6 @@ mod tests {
     }
 
     fn word() -> Vec<BufferEntry> {
-        // `ghbdtn`-shaped word: six scancodes, layout-agnostic.
         [34, 35, 32, 48, 49, 20].map(entry).to_vec()
     }
 
@@ -266,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn phrase_slice_plans_too_for_the_ticket_10_seam() {
+    fn phrase_slice_plans_too() {
         let phrase = [30, 31, 57, 32].map(entry).to_vec();
         let plan = plan_conversion(&phrase, ctx(&pair(), 0, 2)).unwrap();
         assert_eq!(plan.erase, 4);
@@ -275,12 +225,9 @@ mod tests {
 
     #[test]
     fn toward_ignores_current_but_refuses_like_today() {
-        // Diverged current layout (18:55): the target still lands on the
-        // intended position, from the diverged current for a correct undo.
         let plan = plan_conversion_toward(&word(), 1, ctx(&pair(), 1, 2)).unwrap();
         assert_eq!((plan.hop.from, plan.hop.target), (1, 1));
         assert_eq!(plan.erase, 6);
-        // Refusals match plan_conversion exactly.
         assert_eq!(
             plan_conversion_toward(&[], 1, ctx(&pair(), 0, 2)),
             Err(ConversionError::Empty)
@@ -293,9 +240,6 @@ mod tests {
 
     #[test]
     fn toward_agreeing_verdict_flips_when_layout_unchanged() {
-        // Typed under ru, still ru, RU verdict: no external switch, so the
-        // text already matches the layout and the user converts away —
-        // mechanical flip, like the pre-detector behavior.
         use crate::scorer::Intended;
         let mut converter = Converter::new(pair());
         let plan = converter
@@ -306,8 +250,6 @@ mod tests {
 
     #[test]
     fn toward_agreeing_verdict_holds_when_layout_changed() {
-        // 18:55 scenario: typed under us, external switch to ru — the
-        // agreeing verdict sets the target, fixing the screen text.
         use crate::scorer::Intended;
         let mut converter = Converter::new(pair());
         let plan = converter
@@ -318,7 +260,6 @@ mod tests {
 
     #[test]
     fn toward_disagreeing_verdict_holds_when_unchanged() {
-        // Typed under us, still us, RU verdict: the normal EN->RU case.
         use crate::scorer::Intended;
         let mut converter = Converter::new(pair());
         let plan = converter
@@ -331,8 +272,6 @@ mod tests {
     fn toward_resolves_the_intended_layout_through_a_swapped_pair() {
         use crate::scorer::Intended;
         let swapped = LayoutPair::new("ru", "us").unwrap();
-        // Cyrillic verdict lands on position 0 under `layout ru,us`, from
-        // the diverged current for a correct undo.
         let mut converter = Converter::new(swapped);
         let plan = converter
             .convert_toward(&word(), Intended::Ru, 1, 2, None)

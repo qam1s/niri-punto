@@ -1,18 +1,9 @@
 //! Shared undo chain and layout pair guard for both conversion paths.
-//!
-//! The word path ([`crate::convert`]) and the selection path
-//! ([`crate::selection`]) share one shape: plan a fresh conversion and
-//! remember it; a repeated gesture undoes the remembered step and keeps the
-//! reversed step, so a third repeat redoes. Both also gate on the same
-//! condition: the current layout must sit inside the configured pair.
-//! This module holds that shared shape (one generic chain, one pair guard)
-//! so the two converters stay thin wrappers.
 
 use crate::config::LayoutPair;
 use crate::convert::ConversionError;
 
-/// Layout hop by explicit index (never next): the index active before a
-/// step and the index to switch to.
+/// Layout hop by explicit index.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LayoutHop {
     pub from: u8,
@@ -20,7 +11,6 @@ pub struct LayoutHop {
 }
 
 impl LayoutHop {
-    /// The same hop in the opposite direction.
     pub fn swapped(&self) -> Self {
         Self {
             from: self.target,
@@ -29,9 +19,7 @@ impl LayoutHop {
     }
 }
 
-/// The layout context a conversion is planned in: current index, niri layout
-/// count, and the configured pair. Bundles the triple both plan functions
-/// need so call sites pass one value, not three arguments.
+/// The layout context a conversion is planned in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LayoutCtx<'a> {
     pub current: u8,
@@ -40,10 +28,6 @@ pub struct LayoutCtx<'a> {
 }
 
 impl LayoutCtx<'_> {
-    /// The hop to the other layout of the pair. Refuses loudly when the
-    /// current layout sits outside the pair (a third language is active) or
-    /// niri reports fewer than two layouts, so text is never corrupted
-    /// silently.
     pub fn hop(&self) -> Result<LayoutHop, ConversionError> {
         if self.current > 1 || self.count < 2 {
             return Err(ConversionError::Layouts {
@@ -58,12 +42,6 @@ impl LayoutCtx<'_> {
         })
     }
 
-    /// The hop to an explicit pair position, for confident detector
-    /// verdicts: the target is the intended layout, ignoring which layout
-    /// is current (an external switch between typing and triggering must
-    /// not divert the conversion). The pair guard still applies — a third
-    /// language or a single-layout setup is refused exactly as in
-    /// [`LayoutCtx::hop`].
     pub fn hop_toward(&self, target: u8) -> Result<LayoutHop, ConversionError> {
         debug_assert!(target <= 1, "verdict targets a pair position");
         if self.current > 1 || self.count < 2 || target > 1 {
@@ -80,24 +58,17 @@ impl LayoutCtx<'_> {
     }
 }
 
-/// A plan step that knows its own reverse: undo replays the same content
-/// back the other way.
+/// A plan step that knows its own reverse.
 pub trait Reversible: Clone {
     fn reversed(&self) -> Self;
 }
 
-/// A plan step carrying a layout hop: exposes its target so the input
-/// buffer can re-anchor its birth layout after a successful apply.
+/// A plan step carrying a layout hop.
 pub trait HasHop {
     fn hop_target(&self) -> u8;
 }
 
 /// Tracks the convert/undo chain across gestures.
-///
-/// A fresh gesture plans a new conversion and remembers it; a repeated
-/// gesture undoes the remembered step and keeps the reversed step, so a
-/// third repeat redoes (toggle chain). Any physical typing between gestures
-/// must call [`UndoChain::invalidate`], cancelling the pending undo.
 pub struct UndoChain<T: Reversible> {
     last: Option<T>,
 }
@@ -107,19 +78,14 @@ impl<T: Reversible> UndoChain<T> {
         Self { last: None }
     }
 
-    /// Remember a fresh conversion for a later undo.
     pub fn remember(&mut self, plan: T) {
         self.last = Some(plan);
     }
 
-    /// Whether a repeated gesture has a conversion to undo.
     pub fn has_pending_undo(&self) -> bool {
         self.last.is_some()
     }
 
-    /// The hop target of the last remembered step, if any: after a
-    /// successful apply the layout sits there, so the input buffer
-    /// re-anchors its birth layout to it.
     pub fn last_target(&self) -> Option<u8>
     where
         T: HasHop,
@@ -127,8 +93,6 @@ impl<T: Reversible> UndoChain<T> {
         self.last.as_ref().map(|step| step.hop_target())
     }
 
-    /// Undo the last step (or redo the undo, toggling back). Returns `None`
-    /// when [`UndoChain::invalidate`] ran since, or no conversion happened.
     pub fn undo(&mut self) -> Option<T> {
         let done = self.last.take()?;
         let back = done.reversed();
@@ -136,7 +100,6 @@ impl<T: Reversible> UndoChain<T> {
         Some(back)
     }
 
-    /// New physical input cancels the pending undo.
     pub fn invalidate(&mut self) {
         self.last = None;
     }
@@ -213,8 +176,6 @@ mod tests {
     #[test]
     fn hop_toward_ignores_current_but_keeps_the_pair_guard() {
         let pair = pair();
-        // Confident verdict: target is the intended layout even when it
-        // equals the diverged current layout (18:55 scenario).
         assert_eq!(
             ctx(&pair, 1, 2).hop_toward(1).unwrap(),
             LayoutHop { from: 1, target: 1 }
@@ -223,7 +184,6 @@ mod tests {
             ctx(&pair, 0, 2).hop_toward(1).unwrap(),
             LayoutHop { from: 0, target: 1 }
         );
-        // The guard refuses exactly like hop().
         assert_eq!(
             ctx(&pair, 2, 3).hop_toward(1),
             Err(ConversionError::Layouts {

@@ -1,9 +1,4 @@
-//! `doctor`: one command to check devices, permissions, socket, layouts.
-//!
-//! The layout-correspondence analysis is pure ([`check_layouts`]) and
-//! unit-tested; the gathering helpers below it are thin wrappers over the
-//! filesystem, udev-rule presence, and niri IPC. Exit status is 0 when every
-//! check passes, 1 otherwise.
+//! `doctor`: check devices, permissions, socket, layouts.
 
 use crate::config::{self, LayoutPair, RULE_FILE_NAME};
 use crate::ipc::IpcClient;
@@ -22,18 +17,12 @@ pub const UINPUT_NODE: &str = "/dev/uinput";
 pub const UINPUT_SYSFS: &str = "/sys/class/misc/uinput";
 
 /// A layout correspondence finding between the configured pair and niri.
-///
-/// Name equality is deliberately NOT checked: niri reports xkb descriptive
-/// names (`English (US)` for config code `us`), so only the printed
-/// index<->code table lets the user verify the order visually. What IS
-/// checked — count and the active index — is reported explicitly, with the
-/// pair codes and the active niri name inline, so a mismatch never passes
-/// silently.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LayoutFinding {
-    /// niri reports a layout count other than the pair size.
-    CountMismatch { actual: usize, pair: LayoutPair },
-    /// The current index is outside the pair (a third language active).
+    CountMismatch {
+        actual: usize,
+        pair: LayoutPair,
+    },
     CurrentOutsidePair {
         current: u8,
         count: usize,
@@ -67,9 +56,7 @@ impl fmt::Display for LayoutFinding {
     }
 }
 
-/// Compare the configured pair against niri's layout state. Empty means the
-/// count matches and the active index sits inside the pair; anything
-/// returned is a note (see [`LayoutFinding`]).
+/// Compare the configured pair against niri's layout state.
 pub fn check_layouts(pair: &LayoutPair, names: &[String], current: u8) -> Vec<LayoutFinding> {
     let mut findings = Vec::new();
     if names.len() != 2 {
@@ -92,14 +79,11 @@ pub fn check_layouts(pair: &LayoutPair, names: &[String], current: u8) -> Vec<La
     findings
 }
 
-/// How the udev rule fares. Pure over the file content (or its absence).
+/// How the udev rule fares.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RuleCheck {
-    /// Rule present and grants `uaccess`.
     Ok,
-    /// Rule file missing: device access needs the manual install step.
     Missing,
-    /// Rule present but does not mention `uaccess` (edited? foreign?).
     NoUaccess,
 }
 
@@ -130,17 +114,11 @@ pub fn read_rule() -> Option<String> {
     std::fs::read_to_string(RULE_DEST).ok()
 }
 
-/// How /dev/uinput fares. Pure over the node/sysfs paths, so tests use
-/// scratch dirs: opening is read-only and side-effect free.
+/// How /dev/uinput fares.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UinputCheck {
-    /// Opens read-only: driver loaded and access granted.
     Ok,
-    /// Node missing entirely.
     Missing,
-    /// Present but not openable. `driver_loaded` tells a missing driver
-    /// (dead static node: `sudo modprobe uinput`) apart from missing
-    /// access (rule/ACL: rerun `setup`).
     NotUsable { driver_loaded: bool },
 }
 
@@ -179,16 +157,14 @@ pub fn check_uinput(node: &Path, sysfs: &Path) -> UinputCheck {
     }
 }
 
-/// One input node probe: path plus whether it opens as a keyboard.
+/// One input node probe.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DeviceProbe {
     pub path: PathBuf,
     pub readable_keyboard: bool,
 }
 
-/// List `/dev/input/event*` nodes and probe readability. Opening is
-/// read-only and never grabs. Testable with any directory: an empty or
-/// missing dir yields an empty probe list.
+/// List `/dev/input/event*` nodes and probe readability.
 pub fn probe_input_dir(input_dir: &Path) -> Vec<DeviceProbe> {
     let mut probes = Vec::new();
     let Ok(dir) = std::fs::read_dir(input_dir) else {
@@ -220,7 +196,6 @@ fn is_readable_keyboard(path: &Path) -> bool {
     device.supported_events().contains(evdev::EventType::KEY)
 }
 
-/// Print one `key: value` line of the checklist.
 fn line(key: &str, value: impl fmt::Display) {
     println!("{key}: {value}");
 }
@@ -336,10 +311,6 @@ pub fn run() -> i32 {
     exit_code(failed)
 }
 
-/// Layout correspondence section: the index<->code table plus any notes.
-/// Notes never fail the run; only missing data upstream does. The table
-/// always prints, and a clean check says so explicitly — correspondence
-/// never passes silently.
 fn report_correspondence(pair: &LayoutPair, names: &[String], current: u8) {
     for index in 0..=1u8 {
         let configured = pair.get(index).expect("pair holds indices 0 and 1");
@@ -379,8 +350,6 @@ mod tests {
 
     #[test]
     fn descriptive_niri_names_are_not_a_finding() {
-        // niri reports xkb descriptions ("English (US)"), never the codes,
-        // so order is for the user's eyes only — not a checkable fact.
         let findings = check_layouts(&pair(), &names(&["English (US)", "Russian"]), 1);
         assert!(findings.is_empty(), "{findings:?}");
     }

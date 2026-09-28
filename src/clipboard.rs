@@ -1,14 +1,4 @@
 //! Clipboard access for the selection path via `wl-copy`/`wl-paste`.
-//!
-//! Runtime-only: shells out to the wl-clipboard binaries, so there is no
-//! hardware here to test against — but the command plumbing is factored into
-//! `read_with`/`write_with` so tests can point it at stub binaries. A missing
-//! binary surfaces a clear install hint instead of a bare OS error.
-//!
-//! The selection is read from the *primary* selection (highlighted text),
-//! not the regular clipboard: that is what "current selection" means on
-//! Wayland. The converted text is published to the regular clipboard and
-//! pasted over the selection with Ctrl+V from the injector.
 
 use std::io;
 use std::process::{Command, Stdio};
@@ -22,13 +12,8 @@ fn missing(binary: &str) -> io::Error {
     )
 }
 
-/// Selection I/O: read the primary selection, publish converted text. The
-/// production implementation shells out to wl-clipboard ([`WlClipboard`]);
-/// tests slot in an in-memory fake without Wayland.
 pub trait Clipboard {
-    /// Read the current primary selection.
     fn read_selection(&mut self) -> io::Result<String>;
-    /// Publish `text` to the regular clipboard for a follow-up paste.
     fn write_selection(&mut self, text: &str) -> io::Result<()>;
 }
 
@@ -85,8 +70,6 @@ fn write_with(binary: &str, args: &[&str], text: &str) -> io::Result<()> {
         })?;
     if let Some(stdin) = child.stdin.take() {
         let mut stdin = stdin;
-        // The child may exit before reading (e.g. immediate failure):
-        // swallow the pipe error here, the exit status below reports it.
         match stdin.write_all(text.as_bytes()) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {}

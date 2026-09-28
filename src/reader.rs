@@ -1,9 +1,4 @@
 //! evdev reader: keyboard devices, hotplug, and dry-run dispatch.
-//!
-//! Devices are opened read-only and never grabbed, so the daemon can crash
-//! or stop without ever blocking the user's keyboard. The daemon's own
-//! future uinput device is excluded by name so injected keys never loop
-//! back into the buffer.
 
 use crate::buffer::BufferEntry;
 use crate::trigger::Key;
@@ -14,8 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-/// Name of the daemon's own virtual device (created from the next ticket
-/// on, when injection lands). Anything with this name is never opened.
+/// Name of the daemon's own virtual device.
 pub const OWN_DEVICE_NAME: &str = "niri-punto";
 
 /// How often the device directory is rescanned for hotplug changes.
@@ -25,7 +19,6 @@ pub const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RawKey {
     pub scancode: u16,
-    /// evdev value: 0 = release, 1 = press, 2 = autorepeat.
     pub value: i32,
 }
 
@@ -59,7 +52,6 @@ pub fn classify(scancode: u16) -> Key {
     }
 }
 
-/// Scancodes that end a word: space, enter, keypad enter, tab.
 pub fn is_word_boundary(scancode: u16) -> bool {
     scancode == KeyCode::KEY_SPACE.code()
         || scancode == KeyCode::KEY_ENTER.code()
@@ -67,21 +59,14 @@ pub fn is_word_boundary(scancode: u16) -> bool {
         || scancode == KeyCode::KEY_TAB.code()
 }
 
-/// Scancode that drops the buffered history.
 pub fn is_reset(scancode: u16) -> bool {
     scancode == KeyCode::KEY_ESC.code()
 }
 
-/// Scancode that deletes the character before the cursor: mirrored as a
-/// buffer pop, never recorded (recording it desyncs erase/replay counts
-/// from the visible text).
 pub fn is_backspace(scancode: u16) -> bool {
     scancode == KeyCode::KEY_BACKSPACE.code()
 }
 
-/// Scancodes that move the cursor or edit ahead of it: arrows, Home/End,
-/// PageUp/PageDown, Delete, Insert. The buffer no longer describes the
-/// screen, so the caller clears it instead of recording.
 pub fn is_navigation(scancode: u16) -> bool {
     scancode == KeyCode::KEY_LEFT.code()
         || scancode == KeyCode::KEY_RIGHT.code()
@@ -95,9 +80,6 @@ pub fn is_navigation(scancode: u16) -> bool {
         || scancode == KeyCode::KEY_INSERT.code()
 }
 
-/// Action keys: F1 through F24. They trigger app or compositor actions
-/// (refresh, fullscreen, ...), so the screen state after them is
-/// unpredictable and the caller drops the history instead of recording.
 pub fn is_function(scancode: u16) -> bool {
     scancode == KeyCode::KEY_F1.code()
         || scancode == KeyCode::KEY_F2.code()
@@ -125,23 +107,15 @@ pub fn is_function(scancode: u16) -> bool {
         || scancode == KeyCode::KEY_F24.code()
 }
 
-/// The CapsLock key itself: never text. CapsLock also flips the case
-/// semantics of later letters in ways the shift flag cannot model
-/// exactly (letters invert, digits do not), so the caller clears the
-/// history rather than replaying a wrong case.
 pub fn is_caps_lock(scancode: u16) -> bool {
     scancode == KeyCode::KEY_CAPSLOCK.code()
 }
 
-/// Copy keys for the plain-copy exception: Ctrl+C and Ctrl+Insert move
-/// no text and no cursor, so the history survives them (every other
-/// Ctrl shortcut clears it: select-all, cut, paste, undo, ...).
 pub fn is_copy_key(scancode: u16) -> bool {
     scancode == KeyCode::KEY_C.code() || scancode == KeyCode::KEY_INSERT.code()
 }
 
-/// Key name to scancode for `chord` combos: lowercase ASCII letters and
-/// top-row digits. Anything else is rejected at config load.
+/// Key name to scancode for `chord` combos.
 pub fn scancode_by_name(name: &str) -> Option<u16> {
     let code = match name {
         "a" => KeyCode::KEY_A,
@@ -185,8 +159,7 @@ pub fn scancode_by_name(name: &str) -> Option<u16> {
     Some(code.code())
 }
 
-/// Both side scancodes of a modifier key name, for binds of bare
-/// modifiers (`Mod+Shift` fires on either Shift press under Mod).
+/// Both side scancodes of a modifier key name.
 pub fn modifier_scancodes(name: &str) -> Option<(u16, u16)> {
     let (left, right) = match name {
         "mod" => (KeyCode::KEY_LEFTMETA, KeyCode::KEY_RIGHTMETA),
@@ -197,10 +170,6 @@ pub fn modifier_scancodes(name: &str) -> Option<(u16, u16)> {
     Some((left.code(), right.code()))
 }
 
-/// Whether a device with this name must be skipped. The daemon's own
-/// future uinput device is matched by exact name; nameless devices are
-/// kept (real keyboards always report a name, and skipping them would
-/// silently lose input).
 pub fn should_skip_device(name: Option<&str>) -> bool {
     name == Some(OWN_DEVICE_NAME)
 }
@@ -234,9 +203,6 @@ fn candidate_nodes(input_dir: &Path) -> Vec<PathBuf> {
     nodes
 }
 
-/// Try to open one node as a readable keyboard. Returns `None` for
-/// anything unusable: missing nodes, non-key devices, permission errors,
-/// and the daemon's own virtual device. Never grabs.
 fn open_keyboard(path: &Path) -> Option<Device> {
     let device = Device::open(path).ok()?;
     if !device.supported_events().contains(EventType::KEY) {
@@ -258,7 +224,7 @@ fn device_thread(path: PathBuf, tx: Sender<DeviceMsg>) {
         let events = match device.fetch_events() {
             Ok(events) => events,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-            Err(_) => break, // unplugged or lost: report and exit
+            Err(_) => break,
         };
         for event in events {
             if event.event_type() != EventType::KEY {
@@ -269,7 +235,7 @@ fn device_thread(path: PathBuf, tx: Sender<DeviceMsg>) {
                 value: event.value(),
             });
             if tx.send(msg).is_err() {
-                return; // daemon is gone
+                return;
             }
         }
     }
@@ -277,10 +243,7 @@ fn device_thread(path: PathBuf, tx: Sender<DeviceMsg>) {
     let _ = tx.send(DeviceMsg::Disconnected(path));
 }
 
-/// Blocking hotplug reader. Opens every keyboard under `input_dir`,
-/// picks up devices that appear later, and drops ones that disappear —
-/// all without restart. Yields raw key transitions; the caller owns the
-/// buffer and the trigger machine.
+/// Blocking hotplug reader.
 pub struct Reader {
     tx: Sender<DeviceMsg>,
     rx: Receiver<DeviceMsg>,
@@ -288,7 +251,7 @@ pub struct Reader {
     last_rescan: Instant,
 }
 
-/// One short-poll outcome: a key, idle (try again), or every device gone.
+/// One short-poll outcome.
 pub enum Poll {
     Key(RawKey),
     Idle,
@@ -309,10 +272,7 @@ impl Reader {
         reader
     }
 
-    /// Wait up to `timeout` for one key transition so the caller can
-    /// multiplex other work (control-socket requests) between polls.
-    /// Hotplug rescans run at most every [`RESCAN_INTERVAL`], except after
-    /// a device disconnect, which always rescans immediately.
+    /// Wait up to `timeout` for one key transition.
     pub fn poll(&mut self, input_dir: &Path, timeout: Duration) -> Poll {
         match self.rx.recv_timeout(timeout) {
             Ok(DeviceMsg::Key(key)) => Poll::Key(key),
@@ -346,7 +306,6 @@ impl Reader {
             if self.live.contains(&path) {
                 continue;
             }
-            // Probe before spawning so dead ends never occupy the live set.
             if open_keyboard(&path).is_none() {
                 continue;
             }
@@ -356,9 +315,6 @@ impl Reader {
                 .name(format!("evdev-{}", path.display()))
                 .spawn(move || device_thread(thread_path, tx))
                 .ok();
-            // `device_thread` re-opens and logs; record liveness here so a
-            // device that vanishes between probe and spawn is cleaned up
-            // via its Disconnected message instead of lingering forever.
             self.live.insert(path);
         }
     }
