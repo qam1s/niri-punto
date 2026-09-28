@@ -11,7 +11,7 @@ pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pai
 layout "us" "ru"
 binds {
     Mod word
-    Double-Shift selection
+    Double-Shift word
 }
 timings {
     double-shift-ms 400
@@ -226,7 +226,7 @@ pub fn parse_settings(text: &str) -> Result<TriggerSettings, ConfigError> {
             }
             name if name.eq_ignore_ascii_case("double-shift") => {
                 return Err(ConfigError::BadDoubleShift(
-                    "`Double-Shift` moved inside the `binds` block (e.g. `binds { Double-Shift selection }`)".to_string(),
+                    "`Double-Shift` moved inside the `binds` block (e.g. `binds { Double-Shift word }`)".to_string(),
                 ));
             }
             "timings" => {
@@ -262,10 +262,7 @@ fn parse_action(action: &str) -> Result<GestureKind, String> {
     match action {
         "word" => Ok(GestureKind::Word),
         "phrase" => Ok(GestureKind::Phrase),
-        "selection" => Ok(GestureKind::Selection),
-        _ => Err(format!(
-            "bad action {action:?}: want `word`, `phrase`, or `selection`"
-        )),
+        _ => Err(format!("bad action {action:?}: want `word` or `phrase`")),
     }
 }
 
@@ -322,7 +319,7 @@ fn parse_bind(node: &kdl::KdlNode) -> Result<BindLine, ConfigError> {
         Some([action]) => *action,
         _ => {
             return Err(ConfigError::BadBind(format!(
-                "{:?} wants exactly one action (`word`, `phrase`, `selection`, or `off` for tap)",
+                "{:?} wants exactly one action (`word`, `phrase`, or `off` for tap)",
                 node.name().value()
             )));
         }
@@ -691,26 +688,25 @@ mod tests {
         let settings = parse_settings(DEFAULT_CONFIG).unwrap();
         assert_eq!(settings.tap_action, Some(GestureKind::Word));
         assert!(settings.binds.is_empty());
-        assert_eq!(settings.pair_base, GestureKind::Selection);
+        assert_eq!(settings.pair_base, GestureKind::Word);
     }
 
     #[test]
     fn readme_example_parses_to_readme_mapping() {
         let settings = parse_settings(
-            "layout \"us\" \"ru\"\nbinds {\n Mod word\n double-shift selection\n}\ntimings {\n double-shift-ms 400\n undo-ms 3000\n debounce-ms 30\n pending-ms 2000\n tap-ms 300\n}\n",
+            "layout \"us\" \"ru\"\nbinds {\n Mod word\n double-shift word\n}\ntimings {\n double-shift-ms 400\n undo-ms 3000\n debounce-ms 30\n pending-ms 2000\n tap-ms 300\n}\n",
         )
         .unwrap();
         assert_eq!(settings.tap_action, Some(GestureKind::Word));
         assert!(settings.binds.is_empty());
-        assert_eq!(settings.pair_base, GestureKind::Selection);
+        assert_eq!(settings.pair_base, GestureKind::Word);
         assert_eq!(settings.timing, TimingConfig::default());
     }
 
     #[test]
     fn bare_mod_sets_tap_action() {
-        let settings =
-            parse_settings("layout \"us\" \"ru\"\nbinds {\n Mod selection\n}\n").unwrap();
-        assert_eq!(settings.tap_action, Some(GestureKind::Selection));
+        let settings = parse_settings("layout \"us\" \"ru\"\nbinds {\n Mod phrase\n}\n").unwrap();
+        assert_eq!(settings.tap_action, Some(GestureKind::Phrase));
         assert!(settings.binds.is_empty());
     }
 
@@ -729,8 +725,7 @@ mod tests {
     #[test]
     fn duplicate_bare_mod_fails() {
         assert!(
-            parse_settings("layout \"us\" \"ru\"\nbinds {\n Mod word\n Mod selection\n}\n")
-                .is_err()
+            parse_settings("layout \"us\" \"ru\"\nbinds {\n Mod word\n Mod phrase\n}\n").is_err()
         );
     }
 
@@ -742,7 +737,7 @@ mod tests {
     #[test]
     fn modifier_key_expands_to_both_sides() {
         let settings =
-            parse_settings("layout \"us\" \"ru\"\nbinds {\n Mod+Shift selection\n}\n").unwrap();
+            parse_settings("layout \"us\" \"ru\"\nbinds {\n Mod+Shift phrase\n}\n").unwrap();
         assert_eq!(settings.binds.len(), 2);
         assert_eq!(
             settings.binds[0].scancode,
@@ -760,8 +755,8 @@ mod tests {
         let settings = parse_settings("layout \"us\" \"ru\"\n").unwrap();
         assert_eq!(settings.pair_base, GestureKind::Word);
         let settings =
-            parse_settings("layout \"us\" \"ru\"\nbinds {\n double-shift selection\n}\n").unwrap();
-        assert_eq!(settings.pair_base, GestureKind::Selection);
+            parse_settings("layout \"us\" \"ru\"\nbinds {\n double-shift phrase\n}\n").unwrap();
+        assert_eq!(settings.pair_base, GestureKind::Phrase);
         assert!(parse_settings("layout \"us\" \"ru\"\nbinds {\n double-shift turbo\n}\n").is_err());
         assert!(
             parse_settings(
@@ -773,34 +768,34 @@ mod tests {
 
     #[test]
     fn top_level_double_shift_fails_with_migration_hint() {
-        let error = parse_settings("layout \"us\" \"ru\"\ndouble-shift selection\n").unwrap_err();
+        let error = parse_settings("layout \"us\" \"ru\"\ndouble-shift word\n").unwrap_err();
         assert!(error.to_string().contains("binds"), "{error}");
     }
 
     #[test]
     fn top_level_double_shift_hint_is_case_insensitive() {
-        let error = parse_settings("layout \"us\" \"ru\"\nDouble-Shift selection\n").unwrap_err();
+        let error = parse_settings("layout \"us\" \"ru\"\nDouble-Shift word\n").unwrap_err();
         assert!(error.to_string().contains("binds"), "{error}");
     }
 
     #[test]
     fn binds_accept_capitalized_double_shift() {
         let settings =
-            parse_settings("layout \"us\" \"ru\"\nbinds {\n Double-Shift selection\n}\n").unwrap();
-        assert_eq!(settings.pair_base, GestureKind::Selection);
+            parse_settings("layout \"us\" \"ru\"\nbinds {\n Double-Shift phrase\n}\n").unwrap();
+        assert_eq!(settings.pair_base, GestureKind::Phrase);
     }
 
     #[test]
     fn binds_parse_all_actions() {
         let settings = parse_settings(
-            "layout \"us\" \"ru\"\nbinds {\n Mod+L word\n Mod+S selection\n Mod+Shift+P phrase\n}\n",
+            "layout \"us\" \"ru\"\nbinds {\n Mod+L word\n Mod+S phrase\n Mod+Shift+P phrase\n}\n",
         )
         .unwrap();
         assert_eq!(settings.binds.len(), 3);
         assert_eq!(settings.binds[0].scancode, 38);
         assert_eq!(settings.binds[0].kind, GestureKind::Word);
         assert!(settings.binds[0].mods.meta);
-        assert_eq!(settings.binds[1].kind, GestureKind::Selection);
+        assert_eq!(settings.binds[1].kind, GestureKind::Phrase);
         assert_eq!(settings.binds[2].kind, GestureKind::Phrase);
         assert!(settings.binds[2].mods.meta && settings.binds[2].mods.shift);
     }
@@ -820,9 +815,10 @@ mod tests {
             "binds {\n Mod+Space word\n}\n",
             "binds {\n Mod+Alt+L word\n}\n",
             "binds {\n Mod+L sentence\n}\n",
+            "binds {\n Mod+L selection\n}\n",
             "binds {\n Mod+L\n}\n",
             "binds {\n Mod+L word extra\n}\n",
-            "binds {\n Mod+L word\n}\nbinds {\n Mod+S selection\n}\n",
+            "binds {\n Mod+L word\n}\nbinds {\n Mod+S phrase\n}\n",
             "binds Mod+L\n",
         ] {
             let text = format!("layout \"us\" \"ru\"\n{block}");

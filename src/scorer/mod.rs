@@ -93,7 +93,8 @@ fn score(text: &str, symbols: &str, table: &[f32], n: usize) -> Option<f32> {
     Some(sum / (seq.len() - 1) as f32)
 }
 
-/// Synthesize buffer entries for selection text the daemon never typed.
+/// Synthesize buffer entries from text for detector tests.
+#[cfg(test)]
 pub fn entries_from_text(text: &str) -> Vec<BufferEntry> {
     let mut out = Vec::new();
     for ch in text.chars() {
@@ -122,6 +123,7 @@ pub fn entries_from_text(text: &str) -> Vec<BufferEntry> {
     out
 }
 
+#[cfg(test)]
 fn scancode_for_us(en: char) -> Option<u16> {
     if !en.is_ascii_alphabetic() {
         return None;
@@ -132,6 +134,7 @@ fn scancode_for_us(en: char) -> Option<u16> {
         .map(|(scancode, _, _)| *scancode)
 }
 
+#[cfg(test)]
 fn scancode_for_ru(ru: char) -> Option<u16> {
     if ru == 'ё' {
         return Some(20);
@@ -527,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn selection_synthesis_matches_remembered_keystrokes() {
+    fn text_synthesis_matches_remembered_keystrokes() {
         for case in ["ghbdtn", "hello", "privet", "hi", ""] {
             assert_eq!(
                 verdict(&entries_from_text(case)),

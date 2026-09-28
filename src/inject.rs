@@ -55,35 +55,10 @@ pub fn replay_strokes(entries: &[BufferEntry]) -> Vec<KeyStroke> {
     out
 }
 
-/// Press/release pairs for Shift+Insert (layout-independent paste).
-pub fn paste_strokes() -> Vec<KeyStroke> {
-    let shift = KeyCode::KEY_LEFTSHIFT.code();
-    let paste = KeyCode::KEY_INSERT.code();
-    vec![
-        KeyStroke {
-            scancode: shift,
-            value: 1,
-        },
-        KeyStroke {
-            scancode: paste,
-            value: 1,
-        },
-        KeyStroke {
-            scancode: paste,
-            value: 0,
-        },
-        KeyStroke {
-            scancode: shift,
-            value: 0,
-        },
-    ]
-}
-
-/// A sink for key transitions: erase, replay, paste.
+/// A sink for key transitions: erase and replay.
 pub trait Emitter {
     fn erase(&mut self, count: usize) -> io::Result<()>;
     fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()>;
-    fn paste(&mut self) -> io::Result<()>;
 }
 
 /// uinput device that emits corrections.
@@ -119,10 +94,6 @@ impl Injector {
     pub fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()> {
         self.emit_all(&replay_strokes(entries))
     }
-
-    pub fn paste(&mut self) -> io::Result<()> {
-        self.emit_all(&paste_strokes())
-    }
 }
 
 impl Emitter for Injector {
@@ -132,10 +103,6 @@ impl Emitter for Injector {
 
     fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()> {
         Injector::replay(self, entries)
-    }
-
-    fn paste(&mut self) -> io::Result<()> {
-        Injector::paste(self)
     }
 }
 
@@ -277,32 +244,5 @@ mod tests {
     #[test]
     fn replay_empty_emits_nothing() {
         assert!(replay_strokes(&[]).is_empty());
-    }
-
-    #[test]
-    fn paste_emits_shift_insert_tap() {
-        let shift = KeyCode::KEY_LEFTSHIFT.code();
-        let paste = KeyCode::KEY_INSERT.code();
-        assert_eq!(
-            paste_strokes(),
-            vec![
-                KeyStroke {
-                    scancode: shift,
-                    value: 1
-                },
-                KeyStroke {
-                    scancode: paste,
-                    value: 1
-                },
-                KeyStroke {
-                    scancode: paste,
-                    value: 0
-                },
-                KeyStroke {
-                    scancode: shift,
-                    value: 0
-                },
-            ]
-        );
     }
 }

@@ -73,7 +73,6 @@ pub struct Bind {
 pub enum GestureKind {
     Word,
     Phrase,
-    Selection,
 }
 
 /// A recognized trigger.
@@ -279,11 +278,7 @@ impl TriggerMachine {
             if self.meta_held() {
                 self.first_press_ms = None;
                 self.disturbed = false;
-                let kind = if self.ctrl_held() {
-                    GestureKind::Selection
-                } else {
-                    GestureKind::Phrase
-                };
+                let kind = GestureKind::Phrase;
                 let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= self.timing.undo_ms);
                 self.last_gesture = Some((kind, now_ms));
                 return Some(Gesture { kind, undo });
@@ -295,9 +290,7 @@ impl TriggerMachine {
                 {
                     self.first_press_ms = None;
                     self.disturbed = false;
-                    let kind = if self.ctrl_held() {
-                        GestureKind::Selection
-                    } else if self.other_side_down(side) {
+                    let kind = if self.other_side_down(side) {
                         GestureKind::Phrase
                     } else {
                         self.pair_base
@@ -346,11 +339,7 @@ impl TriggerMachine {
                             && !self.shift_held()
                             && now_ms.saturating_sub(pressed_at) <= self.timing.tap_ms =>
                     {
-                        let kind = if self.ctrl_held() {
-                            GestureKind::Selection
-                        } else {
-                            base
-                        };
+                        let kind = base;
                         let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= self.timing.undo_ms);
                         self.last_gesture = Some((kind, now_ms));
                         Some(Gesture { kind, undo })
@@ -471,14 +460,14 @@ mod tests {
     }
 
     #[test]
-    fn held_ctrl_turns_double_shift_into_selection() {
+    fn held_ctrl_keeps_double_shift_word() {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::CtrlLeft, T), None);
         let g = double_shift(&mut m, T + 50);
         assert_eq!(
             g,
             Some(Gesture {
-                kind: GestureKind::Selection,
+                kind: GestureKind::Word,
                 undo: false
             })
         );
@@ -486,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_beats_held_shift() {
+    fn held_shift_pair_is_phrase_regardless_of_ctrl() {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::CtrlLeft, T), None);
         assert_eq!(press(&mut m, Key::ShiftLeft, T + 10), None);
@@ -494,7 +483,7 @@ mod tests {
         assert!(matches!(
             g,
             Some(Gesture {
-                kind: GestureKind::Selection,
+                kind: GestureKind::Phrase,
                 ..
             })
         ));
@@ -740,7 +729,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_plus_mod_tap_is_selection() {
+    fn ctrl_plus_mod_tap_is_word() {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::CtrlLeft, T), None);
         assert_eq!(press(&mut m, Key::MetaLeft, T + 50), None);
@@ -748,7 +737,7 @@ mod tests {
         assert_eq!(
             g,
             Some(Gesture {
-                kind: GestureKind::Selection,
+                kind: GestureKind::Word,
                 undo: false
             })
         );
@@ -797,12 +786,12 @@ mod tests {
     #[test]
     fn pair_base_remaps_plain_double_shift() {
         let mut m = TriggerMachine::new();
-        m.set_pair_base(GestureKind::Selection);
+        m.set_pair_base(GestureKind::Phrase);
         let g = double_shift(&mut m, T);
         assert_eq!(
             g,
             Some(Gesture {
-                kind: GestureKind::Selection,
+                kind: GestureKind::Phrase,
                 undo: false
             })
         );
@@ -851,14 +840,14 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_mod_shift_is_selection() {
+    fn ctrl_mod_shift_is_phrase() {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::CtrlLeft, T), None);
         assert_eq!(press(&mut m, Key::MetaLeft, T + 10), None);
         assert_eq!(
             press(&mut m, Key::ShiftLeft, T + 50),
             Some(Gesture {
-                kind: GestureKind::Selection,
+                kind: GestureKind::Phrase,
                 undo: false
             })
         );
@@ -1067,14 +1056,14 @@ mod tests {
     #[test]
     fn pending_expires_past_the_deadline() {
         let gesture = Gesture {
-            kind: GestureKind::Selection,
+            kind: GestureKind::Phrase,
             undo: true,
         };
         let pending = PendingGesture::new(gesture, T, PENDING_TIMEOUT_MS);
         assert!(!pending.expired(T));
         assert!(!pending.expired(T + PENDING_TIMEOUT_MS));
         assert!(pending.expired(T + PENDING_TIMEOUT_MS + 1));
-        assert_eq!(pending.kind, GestureKind::Selection);
+        assert_eq!(pending.kind, GestureKind::Phrase);
         assert!(pending.undo);
     }
 }

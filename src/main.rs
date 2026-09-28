@@ -1,7 +1,6 @@
 //! niri-punto: keyboard layout corrector daemon for the niri compositor.
 
 mod buffer;
-mod clipboard;
 mod config;
 mod control;
 mod convert;
@@ -9,17 +8,14 @@ mod detector;
 mod doctor;
 mod inject;
 mod ipc;
-mod keymaps;
 mod reader;
 mod scorer;
-mod selection;
 mod setup;
 mod trigger;
 mod undo;
 mod uninstall;
 
 use buffer::{BufferEntry, InputBuffer};
-use clipboard::Clipboard;
 use control::{ControlKind, ControlRequest};
 use convert::{ConversionPlan, Converter};
 use detector::{BigramDetector, Detector};
@@ -27,7 +23,6 @@ use inject::{Emitter, Injector};
 use ipc::{IpcClient, LayoutBackend};
 use reader::Reader;
 use scorer::Verdict;
-use selection::{SelectionConverter, SelectionPlan};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -40,14 +35,13 @@ fn usage() -> ! {
     eprintln!("usage: niri-punto <command> [options]");
     eprintln!("  run [--input-dir DIR] [--config PATH]  start the daemon (single instance)");
     eprintln!("  convert-word           ask the running daemon to convert the last word");
-    eprintln!("  convert-selection      ask the running daemon to convert the selection");
     eprintln!(
         "  setup [--no-udev] [--dry-run]  register this binary, install unit, config, udev rule"
     );
     eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule, cargo copy");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("  version                print the daemon version");
-    eprintln!("niri binds (e.g. Mod+L) use the convert-* subcommands.");
+    eprintln!("niri binds (e.g. Mod+L) use the convert-word subcommand.");
     std::process::exit(2);
 }
 
@@ -136,37 +130,6 @@ fn do_convert(
     Ok(detail)
 }
 
-fn do_convert_selection(
-    selection_converter: &mut SelectionConverter,
-    converter: &mut Converter,
-    ipc: &mut impl LayoutBackend,
-    injector: &mut impl Emitter,
-    clipboard: &mut impl Clipboard,
-    detector: &dyn Detector,
-) -> Result<String, String> {
-    let (current, count) = ipc
-        .current_layout()
-        .map_err(|error| format!("layout read failed: {error}"))?;
-    let text = clipboard
-        .read_selection()
-        .map_err(|error| format!("clipboard read failed: {error}"))?;
-    let plan = match detector.verdict(&scorer::entries_from_text(&text)) {
-        Verdict::Intended(intended) => {
-            selection_converter.convert_toward(&text, intended, current, count)
-        }
-        Verdict::Decline => selection_converter.convert(&text, current, count),
-    }
-    .map_err(|error| format!("skipped ({error})"))?;
-    let detail = format!(
-        "paste {} chars after layout {} (from {current})",
-        plan.converted.chars().count(),
-        plan.hop.target
-    );
-    converter.invalidate();
-    apply_selection_plan(ipc, injector, clipboard, &plan)?;
-    Ok(detail)
-}
-
 fn do_undo(
     converter: &mut Converter,
     ipc: &mut impl LayoutBackend,
@@ -181,53 +144,12 @@ fn do_undo(
     Some(detail)
 }
 
-fn apply_selection_plan(
-    ipc: &mut impl LayoutBackend,
-    injector: &mut impl Emitter,
-    clipboard: &mut impl Clipboard,
-    plan: &SelectionPlan,
-) -> Result<(), String> {
-    // Delete the highlighted selection first: taking primary ownership
-    // below drops the highlight, and a later paste would insert instead
-    // of replacing. One Backspace clears the whole selection while it is
-    // still live, so it runs before the clipboard write.
-    if let Err(error) = injector.erase(1) {
-        let detail = format!("selection delete failed: {error}");
-        eprintln!("convert selection: {detail}");
-        return Err(detail);
-    }
-    if let Err(error) = clipboard.write_selection(&plan.converted) {
-        let detail = format!("clipboard write failed: {error}");
-        eprintln!("convert selection: {detail}");
-        return Err(detail);
-    }
-    if let Err(error) = ipc.switch_to(plan.hop.target) {
-        let detail = format!("layout switch failed: {error}");
-        eprintln!("convert selection: {detail}");
-        return Err(detail);
-    }
-    if !wait_for_barrier(ipc, plan.hop.target) {
-        return Err("layout barrier failed (see daemon log)".to_string());
-    }
-    if let Err(error) = injector.paste() {
-        let detail = format!("paste failed: {error}");
-        eprintln!("convert selection: {detail}");
-        return Err(detail);
-    }
-    Ok(())
-}
-
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = match raw.first().map(String::as_str) {
         None | Some("--input-dir") | Some("--config") => ("run", raw.as_slice()),
         Some("--version") | Some("-V") => version(),
-        Some("run")
-        | Some("convert-word")
-        | Some("convert-selection")
-        | Some("setup")
-        | Some("uninstall")
-        | Some("doctor")
+        Some("run") | Some("convert-word") | Some("setup") | Some("uninstall") | Some("doctor")
         | Some("version") => (raw[0].as_str(), &raw[1..]),
         _ => usage(),
     };
@@ -303,12 +225,6 @@ fn main() {
                 usage();
             }
             client(ControlKind::Word);
-        }
-        "convert-selection" => {
-            if !rest.is_empty() {
-                usage();
-            }
-            client(ControlKind::Selection);
         }
         _ => usage(),
     }
@@ -427,11 +343,9 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
     triggers.set_pair_base(settings.pair_base);
     triggers.set_timing(settings.timing);
     let mut buffer = InputBuffer::default();
-    let mut converter = Converter::new(pair.clone());
-    let mut selection_converter = SelectionConverter::new(pair);
+    let mut converter = Converter::new(pair);
     let mut pending: Option<PendingGesture> = None;
     let detector = BigramDetector;
-    let mut clipboard = clipboard::WlClipboard;
     let mut last_focus: Option<Option<u64>> = None;
     let mut focus_broken = false;
     eprintln!(
@@ -451,11 +365,9 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
                     triggers: &mut triggers,
                     buffer: &mut buffer,
                     converter: &mut converter,
-                    selection_converter: &mut selection_converter,
                     detector: &detector,
                     ipc: &mut ipc,
                     injector: &mut injector,
-                    clipboard: &mut clipboard,
                 };
                 note_focus(
                     &mut daemon,
@@ -471,11 +383,9 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
                 triggers: &mut triggers,
                 buffer: &mut buffer,
                 converter: &mut converter,
-                selection_converter: &mut selection_converter,
                 detector: &detector,
                 ipc: &mut ipc,
                 injector: &mut injector,
-                clipboard: &mut clipboard,
             };
             let now_ms = start.elapsed().as_millis() as u64;
             note_focus(
@@ -492,25 +402,25 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
 fn handle_control(
     request: ControlRequest,
     now_ms: u64,
-    daemon: &mut Daemon<impl Emitter, impl LayoutBackend, impl Clipboard>,
+    daemon: &mut Daemon<impl Emitter, impl LayoutBackend>,
     pending: &mut Option<PendingGesture>,
 ) {
     let Daemon {
         triggers,
         buffer,
         converter,
-        selection_converter,
         detector,
         ipc,
         injector,
-        clipboard,
     } = daemon;
     if !triggers.modifiers_free() {
-        let kind = match request.kind {
-            ControlKind::Word => GestureKind::Word,
-            ControlKind::Selection => GestureKind::Selection,
-        };
-        *pending = Some(triggers.stage(Gesture { kind, undo: false }, now_ms));
+        *pending = Some(triggers.stage(
+            Gesture {
+                kind: GestureKind::Word,
+                undo: false,
+            },
+            now_ms,
+        ));
         eprintln!(
             "control: {} deferred until modifiers release",
             request.kind.as_line().trim()
@@ -533,7 +443,6 @@ fn handle_control(
                 &mut **injector,
             ) {
                 Ok(detail) => {
-                    selection_converter.invalidate();
                     if let Some(target) = converter.last_target() {
                         buffer.reanchor(target);
                     }
@@ -542,42 +451,22 @@ fn handle_control(
                 Err(detail) => format!("err bind-word: {detail}"),
             }
         }
-        ControlKind::Selection => {
-            match do_convert_selection(
-                selection_converter,
-                converter,
-                &mut **ipc,
-                &mut **injector,
-                &mut **clipboard,
-                *detector,
-            ) {
-                Ok(detail) => {
-                    if let Some(target) = selection_converter.last_target() {
-                        buffer.reanchor(target);
-                    }
-                    format!("ok bind-selection: {detail}")
-                }
-                Err(detail) => format!("err bind-selection: {detail}"),
-            }
-        }
     };
     eprintln!("control: {} -> {answer}", request.kind.as_line().trim());
     let _ = request.reply.send(answer);
 }
 
-struct Daemon<'a, I: Emitter, L: LayoutBackend, C: Clipboard> {
+struct Daemon<'a, I: Emitter, L: LayoutBackend> {
     triggers: &'a mut TriggerMachine,
     buffer: &'a mut InputBuffer,
     converter: &'a mut Converter,
-    selection_converter: &'a mut SelectionConverter,
     detector: &'a dyn Detector,
     ipc: &'a mut L,
     injector: &'a mut I,
-    clipboard: &'a mut C,
 }
 
 fn note_focus(
-    daemon: &mut Daemon<impl Emitter, impl LayoutBackend, impl Clipboard>,
+    daemon: &mut Daemon<impl Emitter, impl LayoutBackend>,
     last_focus: &mut Option<Option<u64>>,
     focus_broken: &mut bool,
     pending: &mut Option<PendingGesture>,
@@ -589,7 +478,6 @@ fn note_focus(
                 if old != focus {
                     daemon.buffer.clear();
                     daemon.converter.invalidate();
-                    daemon.selection_converter.invalidate();
                     *pending = None;
                     eprintln!("focus: window changed ({old:?} -> {focus:?}), buffer cleared");
                 }
@@ -607,7 +495,7 @@ fn note_focus(
 fn handle_key(
     raw: reader::RawKey,
     start: &Instant,
-    daemon: &mut Daemon<impl Emitter, impl LayoutBackend, impl Clipboard>,
+    daemon: &mut Daemon<impl Emitter, impl LayoutBackend>,
     pending: &mut Option<PendingGesture>,
 ) {
     handle_key_at(raw, start.elapsed().as_millis() as u64, daemon, pending);
@@ -616,18 +504,16 @@ fn handle_key(
 fn handle_key_at(
     raw: reader::RawKey,
     now_ms: u64,
-    daemon: &mut Daemon<impl Emitter, impl LayoutBackend, impl Clipboard>,
+    daemon: &mut Daemon<impl Emitter, impl LayoutBackend>,
     pending: &mut Option<PendingGesture>,
 ) {
     let Daemon {
         triggers,
         buffer,
         converter,
-        selection_converter,
         detector,
         ipc,
         injector,
-        clipboard,
     } = daemon;
     let key = reader::classify(raw.scancode);
 
@@ -638,7 +524,6 @@ fn handle_key_at(
         *pending = Some(triggers.stage(gesture, now_ms));
     } else if reader::is_typing_key(key, raw.value) {
         converter.invalidate();
-        selection_converter.invalidate();
         *pending = None;
         if reader::is_backspace(raw.scancode) {
             if triggers.ctrl_held() {
@@ -742,7 +627,6 @@ fn handle_key_at(
                 &mut **injector,
             ) {
                 Ok(detail) => {
-                    selection_converter.invalidate();
                     if let Some(target) = converter.last_target() {
                         buffer.reanchor(target);
                     }
@@ -780,38 +664,6 @@ fn handle_key_at(
                 Err(detail) => eprintln!("phrase: {detail}"),
             }
         }
-        GestureKind::Selection => {
-            if staged.undo && selection_converter.has_pending_undo() {
-                if let Some(plan) = selection_converter.undo() {
-                    eprintln!(
-                        "undo selection: paste back after layout {}",
-                        plan.hop.target
-                    );
-                    match apply_selection_plan(&mut **ipc, &mut **injector, &mut **clipboard, &plan)
-                    {
-                        Ok(()) => buffer.reanchor(plan.hop.target),
-                        Err(detail) => eprintln!("undo selection: {detail}"),
-                    }
-                }
-                return;
-            }
-            match do_convert_selection(
-                selection_converter,
-                converter,
-                &mut **ipc,
-                &mut **injector,
-                &mut **clipboard,
-                *detector,
-            ) {
-                Ok(detail) => {
-                    if let Some(target) = selection_converter.last_target() {
-                        buffer.reanchor(target);
-                    }
-                    eprintln!("convert selection: {detail}")
-                }
-                Err(detail) => eprintln!("convert selection: {detail}"),
-            }
-        }
     }
 }
 
@@ -829,7 +681,6 @@ mod tests {
     struct FakeEmitter {
         erases: Vec<usize>,
         replays: Vec<Vec<BufferEntry>>,
-        pastes: usize,
     }
 
     impl Emitter for FakeEmitter {
@@ -840,11 +691,6 @@ mod tests {
 
         fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()> {
             self.replays.push(entries.to_vec());
-            Ok(())
-        }
-
-        fn paste(&mut self) -> io::Result<()> {
-            self.pastes += 1;
             Ok(())
         }
     }
@@ -893,22 +739,6 @@ mod tests {
         }
     }
 
-    struct FakeClipboard {
-        text: String,
-        written: Vec<String>,
-    }
-
-    impl Clipboard for FakeClipboard {
-        fn read_selection(&mut self) -> io::Result<String> {
-            Ok(self.text.clone())
-        }
-
-        fn write_selection(&mut self, text: &str) -> io::Result<()> {
-            self.written.push(text.to_string());
-            Ok(())
-        }
-    }
-
     const T: u64 = 10_000;
     const SHIFT: u16 = KeyCode::KEY_LEFTSHIFT.code();
     const SHIFT_RIGHT: u16 = KeyCode::KEY_RIGHTSHIFT.code();
@@ -932,11 +762,9 @@ mod tests {
         triggers: TriggerMachine,
         buffer: InputBuffer,
         converter: Converter,
-        selection_converter: SelectionConverter,
         detector: Box<dyn Detector>,
         ipc: FakeLayouts,
         injector: FakeEmitter,
-        clipboard: FakeClipboard,
         pending: Option<PendingGesture>,
         now: u64,
         last_focus: Option<Option<u64>>,
@@ -957,8 +785,7 @@ mod tests {
             Self {
                 triggers: TriggerMachine::new(),
                 buffer: InputBuffer::default(),
-                converter: Converter::new(pair.clone()),
-                selection_converter: SelectionConverter::new(pair),
+                converter: Converter::new(pair),
                 detector,
                 ipc: FakeLayouts {
                     current: 0,
@@ -970,10 +797,6 @@ mod tests {
                     focus_err: false,
                 },
                 injector: FakeEmitter::default(),
-                clipboard: FakeClipboard {
-                    text: "ghbdtn".to_string(),
-                    written: Vec::new(),
-                },
                 pending: None,
                 now: T,
                 last_focus: None,
@@ -987,11 +810,9 @@ mod tests {
                 triggers: &mut self.triggers,
                 buffer: &mut self.buffer,
                 converter: &mut self.converter,
-                selection_converter: &mut self.selection_converter,
                 detector: self.detector.as_ref(),
                 ipc: &mut self.ipc,
                 injector: &mut self.injector,
-                clipboard: &mut self.clipboard,
             };
             handle_key_at(raw, self.now, &mut daemon, &mut self.pending);
         }
@@ -1001,11 +822,9 @@ mod tests {
                 triggers: &mut self.triggers,
                 buffer: &mut self.buffer,
                 converter: &mut self.converter,
-                selection_converter: &mut self.selection_converter,
                 detector: self.detector.as_ref(),
                 ipc: &mut self.ipc,
                 injector: &mut self.injector,
-                clipboard: &mut self.clipboard,
             };
             note_focus(
                 &mut daemon,
@@ -1331,23 +1150,6 @@ mod tests {
     }
 
     #[test]
-    fn diverged_layout_confident_selection_converts_toward_intended() {
-        let mut h = Harness::with_detector(Box::new(BigramDetector));
-        h.ipc.current = 1;
-        h.at(T, CTRL, 1);
-        h.at(T + 50, SHIFT, 1);
-        h.at(T + 100, SHIFT, 0);
-        h.at(T + 200, SHIFT, 1);
-        h.at(T + 250, SHIFT, 0);
-        assert!(h.ipc.switches.is_empty());
-        h.at(T + 300, CTRL, 0);
-        assert_eq!(h.ipc.switches, vec![1]);
-        assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
-        assert_eq!(h.injector.erases, vec![1]);
-        assert_eq!(h.injector.pastes, 1);
-    }
-
-    #[test]
     fn swapped_pair_diverged_word_converts_toward_the_ru_position() {
         let pair = LayoutPair::new("ru", "us").unwrap();
         let mut h = Harness::with_detector_and_pair(Box::new(BigramDetector), pair);
@@ -1356,24 +1158,6 @@ mod tests {
         h.double_shift(T + 500);
         assert_eq!(h.ipc.switches, vec![0]);
         assert_eq!(h.injector.erases, vec![6]);
-    }
-
-    #[test]
-    fn swapped_pair_diverged_selection_converts_toward_the_ru_position() {
-        let pair = LayoutPair::new("ru", "us").unwrap();
-        let mut h = Harness::with_detector_and_pair(Box::new(BigramDetector), pair);
-        h.ipc.current = 1;
-        h.at(T, CTRL, 1);
-        h.at(T + 50, SHIFT, 1);
-        h.at(T + 100, SHIFT, 0);
-        h.at(T + 200, SHIFT, 1);
-        h.at(T + 250, SHIFT, 0);
-        assert!(h.ipc.switches.is_empty());
-        h.at(T + 300, CTRL, 0);
-        assert_eq!(h.ipc.switches, vec![0]);
-        assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
-        assert_eq!(h.injector.erases, vec![1]);
-        assert_eq!(h.injector.pastes, 1);
     }
 
     #[test]
@@ -1408,19 +1192,19 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_double_shift_converts_selection() {
+    fn ctrl_double_shift_converts_word() {
         let mut h = Harness::new();
-        h.at(T, CTRL, 1);
-        h.at(T + 50, SHIFT, 1);
-        h.at(T + 100, SHIFT, 0);
-        h.at(T + 200, SHIFT, 1);
-        h.at(T + 250, SHIFT, 0);
+        h.type_word(T);
+        h.at(T + 500, CTRL, 1);
+        h.at(T + 550, SHIFT, 1);
+        h.at(T + 600, SHIFT, 0);
+        h.at(T + 700, SHIFT, 1);
+        h.at(T + 750, SHIFT, 0);
         assert!(h.ipc.switches.is_empty());
-        h.at(T + 300, CTRL, 0);
+        h.at(T + 800, CTRL, 0);
         assert_eq!(h.ipc.switches, vec![1]);
-        assert_eq!(h.clipboard.written, vec!["привет".to_string()]);
-        assert_eq!(h.injector.erases, vec![1]);
-        assert_eq!(h.injector.pastes, 1);
+        assert_eq!(h.injector.erases, vec![6]);
+        assert_eq!(h.injector.replays.len(), 1);
     }
 
     #[test]
@@ -1435,11 +1219,9 @@ mod tests {
                 triggers: &mut h.triggers,
                 buffer: &mut h.buffer,
                 converter: &mut h.converter,
-                selection_converter: &mut h.selection_converter,
                 detector: h.detector.as_ref(),
                 ipc: &mut h.ipc,
                 injector: &mut h.injector,
-                clipboard: &mut h.clipboard,
             };
             handle_control(
                 ControlRequest {

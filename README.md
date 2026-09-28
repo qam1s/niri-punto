@@ -16,10 +16,7 @@ The daemon reads key presses, remembers them as scancodes, and on your trigger
 erases the typed text, switches the layout by index over niri IPC, and replays
 the same scancodes, they render in the new layout. Repeating the gesture
 undoes the conversion. It never grabs the keyboard: if the daemon dies, your
-keyboard keeps working. Selection conversion reads the primary selection,
-deletes the highlight, and pastes via Shift+Insert (staged in both clipboard
-selections, since browsers and terminals paste from different ones), so it
-needs [wl-clipboard](https://github.com/bugaevc/wl-clipboard).
+keyboard keeps working.
 
 ## Install
 
@@ -33,7 +30,7 @@ cargo install --git https://github.com/qam1s/niri-punto --locked && ~/.cargo/bin
 | -------------- | --------- | ---------------------------------------- |
 | Mod            | word      | Convert word or switch layout when empty |
 | Mod + Shift    | phrase    | Convert phrase                           |
-| Double Shift   | selection | Convert selection                        |
+| Double Shift   | word      | Convert word                             |
 | Repeat gesture | undo      | Undo previous conversion                 |
 
 ## Config
@@ -46,7 +43,7 @@ layout "us" "ru"
 binds {
     Mod word
     Mod+Shift phrase
-    Double-Shift selection
+    Double-Shift word
 }
 
 timings {

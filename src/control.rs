@@ -10,14 +10,12 @@ use std::sync::mpsc::Sender;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ControlKind {
     Word,
-    Selection,
 }
 
 impl ControlKind {
     pub fn as_line(self) -> &'static str {
         match self {
             Self::Word => "convert-word\n",
-            Self::Selection => "convert-selection\n",
         }
     }
 }
@@ -25,7 +23,6 @@ impl ControlKind {
 pub fn parse_request(line: &str) -> Option<ControlKind> {
     match line.trim() {
         "convert-word" => Some(ControlKind::Word),
-        "convert-selection" => Some(ControlKind::Selection),
         _ => None,
     }
 }
@@ -112,10 +109,6 @@ pub fn serve_one(stream: UnixStream, requests: &Sender<ControlRequest>) -> bool 
         write_reply(&stream, &format!("err unknown command: {}", line.trim()));
         return true;
     };
-    if kind == ControlKind::Selection {
-        write_reply(&stream, "err selection conversion is not wired yet");
-        return true;
-    }
     let (tx, rx) = std::sync::mpsc::channel::<String>();
     if requests.send(ControlRequest { kind, reply: tx }).is_err() {
         write_reply(&stream, "err daemon is shutting down");
@@ -139,10 +132,7 @@ mod tests {
     fn known_commands_parse_with_or_without_newline() {
         assert_eq!(parse_request("convert-word"), Some(ControlKind::Word));
         assert_eq!(parse_request("convert-word\n"), Some(ControlKind::Word));
-        assert_eq!(
-            parse_request("convert-selection\n"),
-            Some(ControlKind::Selection)
-        );
+        assert_eq!(parse_request("convert-selection\n"), None);
     }
 
     #[test]
@@ -158,10 +148,6 @@ mod tests {
         assert_eq!(
             parse_request(ControlKind::Word.as_line()),
             Some(ControlKind::Word)
-        );
-        assert_eq!(
-            parse_request(ControlKind::Selection.as_line()),
-            Some(ControlKind::Selection)
         );
     }
 
@@ -218,15 +204,15 @@ mod tests {
     }
 
     #[test]
-    fn selection_request_is_answered_without_main_loop() {
+    fn removed_selection_command_is_unknown() {
         let (client, server) = PairStream::pair().unwrap();
-        let (tx, rx) = channel::<ControlRequest>();
+        let (tx, _rx) = channel::<ControlRequest>();
         let thread = std::thread::spawn(move || serve_one(server, &tx));
 
         let mut client = client;
         client.write_all(b"convert-selection\n").unwrap();
-        assert!(recv_line(&client).starts_with("err "));
-        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        let reply = recv_line(&client);
+        assert!(reply.starts_with("err unknown command"), "{reply}");
         thread.join().unwrap();
     }
 
