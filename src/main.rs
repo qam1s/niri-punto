@@ -44,7 +44,7 @@ fn usage() -> ! {
     eprintln!(
         "  setup [--no-udev] [--dry-run]  register this binary, install unit, config, udev rule"
     );
-    eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule (keeps config)");
+    eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule, cargo copy");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("niri binds (e.g. Mod+L) use the convert-* subcommands.");
     std::process::exit(2);
