@@ -8,8 +8,7 @@
 </p>
 
 Keyboard layout corrector for the [niri](https://github.com/niri-wm/niri)
-Wayland compositor. Typed text in the wrong layout? Hit the trigger and the text
-is rewritten in the right layout, and the layout switches to match.
+Wayland compositor.
 
 ## How it works
 
@@ -17,20 +16,12 @@ The daemon reads key presses, remembers them as scancodes, and on your trigger
 erases the typed text, switches the layout by index over niri IPC, and replays
 the same scancodes, they render in the new layout. Repeating the gesture
 undoes the conversion. It never grabs the keyboard: if the daemon dies, your
-keyboard keeps working.
-
-`niri-punto doctor` prints niri's layout names, the current index, and the resulting
-correspondence. With more than two system layouts, manual conversion
-works within the configured pair only. Each `binds` entry is the required
-modifiers (`Mod`, `Shift`, `Ctrl`, at least one) held plus the key press;
-key names are letters and digits. The bind key is the trigger, not text,
-so the converted scope stays exact. A bad file stops the daemon at start,
-like a bad `layout` node.
+keyboard keeps working. Selection conversion goes through the clipboard
+and needs [wl-clipboard](https://github.com/bugaevc/wl-clipboard).
 
 ## Install
 
-Requirements: [niri](https://github.com/niri-wm/niri),
-[wl-clipboard](https://github.com/bugaevc/wl-clipboard).
+Requirements: [niri](https://github.com/niri-wm/niri).
 
 Via cargo (needs a Rust toolchain):
 
@@ -54,9 +45,7 @@ from the [Releases page](https://github.com/qam1s/niri-punto/releases)
 
 ## Config
 
-`setup` writes the default config to `~/.config/niri-punto/config.kdl`
-(`$XDG_CONFIG_HOME` respected when set) and never overwrites an existing
-file.
+`~/.config/niri-punto/config.kdl` (`$XDG_CONFIG_HOME` respected when set).
 
 ```kdl
 layout "us" "ru"
