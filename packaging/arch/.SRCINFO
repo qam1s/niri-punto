@@ -1,0 +1,15 @@
+pkgbase = niri-punto
+	pkgdesc = Keyboard layout corrector for the niri Wayland compositor
+	pkgver = 0.3.1
+	pkgrel = 1
+	url = https://github.com/qam1s/niri-punto
+	install = niri-punto.install
+	arch = x86_64
+	license = GPL-3.0-or-later
+	makedepends = cargo
+	depends = glibc
+	optdepends = wl-clipboard: selection conversion via clipboard
+	source = niri-punto-0.3.1.tar.gz::https://github.com/qam1s/niri-punto/archive/v0.3.1.tar.gz
+	sha256sums = 8b9ac0716e4d7da45f59f3751b02ec19f27b74a5d9e7a6bfc332879a4f5d9ad3
+
+pkgname = niri-punto

@@ -1,0 +1,51 @@
+name: aur
+
+# Publishes packaging/arch to the AUR on every version tag.
+# The bumped PKGBUILD/.SRCINFO live in the AUR repo only; this repo keeps
+# the template. Needs the AUR_SSH_PRIVATE_KEY secret (SSH key registered
+# on https://aur.archlinux.org).
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Bump pkgver, checksums and .SRCINFO
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          version="${VERSION#v}"
+          docker run --rm -e VERSION="$version" -v "$PWD/packaging/arch:/pkg" archlinux:base-devel bash -c '
+            pacman -Syu --noconfirm --needed base-devel git >/dev/null 2>&1
+            useradd -m builder
+            chown -R builder:builder /pkg
+            su builder -c "
+              cd /pkg &&
+              sed -i \"0,/^pkgver=.*/s//pkgver=\$VERSION/\" PKGBUILD &&
+              sed -i \"0,/^pkgrel=.*/s//pkgrel=1/\" PKGBUILD &&
+              updpkgsums &&
+              makepkg --printsrcinfo > .SRCINFO
+            "
+          '
+
+      - name: Push to AUR
+        env:
+          AUR_SSH_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          VERSION: ${{ github.ref_name }}
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "$AUR_SSH_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          printf 'Host aur.archlinux.org\n  IdentityFile ~/.ssh/aur\n  StrictHostKeyChecking accept-new\n  User aur\n' > ~/.ssh/config
+          git -c init.defaultBranch=master clone ssh://aur@aur.archlinux.org/niri-punto.git /tmp/aur-push
+          cp packaging/arch/PKGBUILD packaging/arch/.SRCINFO packaging/arch/niri-punto.install /tmp/aur-push/
+          cd /tmp/aur-push
+          git add PKGBUILD .SRCINFO niri-punto.install
+          git -c user.name="niri-punto CI" -c user.email="niri-punto-ci@localhost" commit -m "Update to ${VERSION#v}"
+          git push

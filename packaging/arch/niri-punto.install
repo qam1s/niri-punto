@@ -1,0 +1,17 @@
+_hint() {
+	echo "==> niri-punto: run 'niri-punto setup' to create the default config,"
+	echo "    then 'systemctl --user enable --now niri-punto.service'."
+	echo "    Load the driver once with 'sudo modprobe uinput' (or reboot)."
+}
+
+post_install() {
+	_hint
+}
+
+post_upgrade() {
+	if [ -e /etc/udev/rules.d/99-niri-punto.rules ]; then
+		rm -f /etc/udev/rules.d/99-niri-punto.rules
+		echo "==> niri-punto: removed stale 99-niri-punto.rules left by the 0.1.0 setup."
+	fi
+	_hint
+}
