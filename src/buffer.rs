@@ -67,6 +67,31 @@ impl InputBuffer {
         self.entries.push(entry);
     }
 
+    /// Mirror a Backspace press: drop the most recent entry. No-op when
+    /// empty; the birth anchor resets with the fill so a fully-erased
+    /// word does not inherit a stale layout.
+    pub fn pop(&mut self) {
+        self.entries.pop();
+        if self.entries.is_empty() {
+            self.birth_layout = None;
+        }
+    }
+
+    /// Mirror Ctrl+Backspace: drop the trailing word (the suffix after
+    /// the last boundary), keeping earlier fills intact.
+    pub fn pop_word(&mut self, is_boundary: impl Fn(u16) -> bool) {
+        let cut = self
+            .entries
+            .iter()
+            .rposition(|e| is_boundary(e.scancode))
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        self.entries.truncate(cut);
+        if self.entries.is_empty() {
+            self.birth_layout = None;
+        }
+    }
+
     pub fn clear(&mut self) {
         self.entries.clear();
         self.birth_layout = None;
@@ -238,5 +263,57 @@ mod tests {
         assert_eq!(buf.birth_layout(), None);
         buf.note_birth(0);
         assert_eq!(buf.birth_layout(), Some(0));
+    }
+
+    #[test]
+    fn pop_drops_the_most_recent_entry() {
+        let mut buf = InputBuffer::default();
+        for code in [30, 48, 31] {
+            buf.push(entry(code));
+        }
+        buf.pop();
+        let codes: Vec<u16> = buf.entries().iter().map(|e| e.scancode).collect();
+        assert_eq!(codes, vec![30, 48]);
+    }
+
+    #[test]
+    fn pop_on_empty_is_a_noop() {
+        let mut buf = InputBuffer::default();
+        buf.pop();
+        assert_eq!(buf.len(), 0);
+        assert_eq!(buf.birth_layout(), None);
+    }
+
+    #[test]
+    fn pop_to_empty_resets_the_birth_anchor() {
+        let mut buf = InputBuffer::default();
+        buf.note_birth(1);
+        buf.push(entry(30));
+        buf.pop();
+        assert_eq!(buf.len(), 0);
+        assert_eq!(buf.birth_layout(), None);
+    }
+
+    #[test]
+    fn pop_word_drops_the_trailing_word() {
+        let mut buf = InputBuffer::default();
+        for code in [30, 48, SPACE, 31, 32] {
+            buf.push(entry(code));
+        }
+        buf.pop_word(is_boundary);
+        let codes: Vec<u16> = buf.entries().iter().map(|e| e.scancode).collect();
+        assert_eq!(codes, vec![30, 48, SPACE]);
+    }
+
+    #[test]
+    fn pop_word_without_boundary_clears_all() {
+        let mut buf = InputBuffer::default();
+        buf.note_birth(1);
+        for code in [30, 48] {
+            buf.push(entry(code));
+        }
+        buf.pop_word(is_boundary);
+        assert_eq!(buf.len(), 0);
+        assert_eq!(buf.birth_layout(), None);
     }
 }

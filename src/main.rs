@@ -679,13 +679,36 @@ fn handle_key_at(
         *pending = None;
         // Anchor the fill to the layout it is typed under (one IPC query
         // per fill): a confident verdict only overrides the current layout
-        // when the layout moved since typing (external switch).
-        if buffer.birth_layout().is_none() {
+        // when the layout moved since typing (external switch). Edits and
+        // cursor moves carry no layout of their own, so they never anchor.
+        if !reader::is_backspace(raw.scancode)
+            && !reader::is_navigation(raw.scancode)
+            && buffer.birth_layout().is_none()
+        {
             if let Ok((current, _)) = ipc.current_layout() {
                 buffer.note_birth(current);
             }
         }
-        if raw.value == 1 {
+        if reader::is_backspace(raw.scancode) {
+            // Mirror the screen edit instead of recording it: a plain
+            // Backspace drops one entry per press and per autorepeat,
+            // Ctrl+Backspace drops the trailing word. Recording the
+            // Backspace scancode itself desyncs erase/replay from the
+            // visible text (a stale prefix on the next conversion).
+            if triggers.ctrl_held() {
+                buffer.pop_word(reader::is_word_boundary);
+            } else {
+                buffer.pop();
+            }
+        } else if reader::is_navigation(raw.scancode) {
+            // The cursor moved (or text changed ahead of it): the buffer
+            // no longer describes the screen, so drop it rather than
+            // corrupt the next conversion. Refusing beats mangling.
+            buffer.clear();
+            if raw.value == 1 {
+                eprintln!("buffer: cleared (cursor moved)");
+            }
+        } else if raw.value == 1 {
             if reader::is_reset(raw.scancode) {
                 buffer.clear();
                 eprintln!("buffer: cleared (esc)");
@@ -945,6 +968,8 @@ mod tests {
     const SHIFT: u16 = KeyCode::KEY_LEFTSHIFT.code();
     const SHIFT_RIGHT: u16 = KeyCode::KEY_RIGHTSHIFT.code();
     const CTRL: u16 = KeyCode::KEY_LEFTCTRL.code();
+    const BACKSPACE: u16 = KeyCode::KEY_BACKSPACE.code();
+    const LEFT: u16 = KeyCode::KEY_LEFT.code();
     /// Mod (Super): held during a Mod+L bind, invisible to the trigger
     /// machine until the fix.
     const SUPER: u16 = KeyCode::KEY_LEFTMETA.code();
@@ -1157,6 +1182,65 @@ mod tests {
             WORD.to_vec()
         );
         assert!(h.converter.has_pending_undo());
+    }
+
+    #[test]
+    fn backspace_then_retype_converts_only_retyped_word() {
+        // The reported case: type a letter, erase it, type a new word.
+        // The stale prefix must not leak into erase/replay counts.
+        let mut h = Harness::new();
+        h.tap(T, 38);
+        h.tap(T + 100, BACKSPACE);
+        assert!(h.buffer.phrase().is_empty());
+        h.type_codes(T + 200, &[34, 23, 20]);
+        h.double_shift(T + 800);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.injector.erases, vec![3]);
+        assert_eq!(
+            h.injector.replays[0]
+                .iter()
+                .map(|e| e.scancode)
+                .collect::<Vec<_>>(),
+            vec![34, 23, 20]
+        );
+    }
+
+    #[test]
+    fn backspace_autorepeat_pops_one_entry_per_repeat() {
+        let mut h = Harness::new();
+        h.type_codes(T, &[30, 48, 31, 32]);
+        h.at(T + 500, BACKSPACE, 1);
+        h.at(T + 510, BACKSPACE, 0);
+        h.at(T + 520, BACKSPACE, 2);
+        h.at(T + 530, BACKSPACE, 2);
+        let codes: Vec<u16> = h.buffer.phrase().iter().map(|e| e.scancode).collect();
+        assert_eq!(codes, vec![30]);
+    }
+
+    #[test]
+    fn ctrl_backspace_drops_the_trailing_word() {
+        let mut h = Harness::new();
+        h.type_codes(T, &[30, 48, 57, 31, 32]);
+        h.at(T + 500, CTRL, 1);
+        h.at(T + 520, BACKSPACE, 1);
+        h.at(T + 530, BACKSPACE, 0);
+        h.at(T + 540, CTRL, 0);
+        let codes: Vec<u16> = h.buffer.phrase().iter().map(|e| e.scancode).collect();
+        assert_eq!(codes, vec![30, 48, 57]);
+        // The trailing word is empty now: the conversion is refused
+        // instead of replaying a stale suffix.
+        h.double_shift(T + 900);
+        assert!(h.injector.erases.is_empty());
+        assert!(h.ipc.switches.is_empty());
+    }
+
+    #[test]
+    fn arrow_clears_the_buffer() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        assert!(!h.buffer.phrase().is_empty());
+        h.tap(T + 500, LEFT);
+        assert!(h.buffer.phrase().is_empty());
     }
 
     /// `ghbdtn` in true keystroke order (g,h,b,d,t,n): Ru-confident for

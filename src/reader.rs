@@ -66,6 +66,29 @@ pub fn is_reset(scancode: u16) -> bool {
     scancode == KeyCode::KEY_ESC.code()
 }
 
+/// Scancode that deletes the character before the cursor: mirrored as a
+/// buffer pop, never recorded (recording it desyncs erase/replay counts
+/// from the visible text).
+pub fn is_backspace(scancode: u16) -> bool {
+    scancode == KeyCode::KEY_BACKSPACE.code()
+}
+
+/// Scancodes that move the cursor or edit ahead of it: arrows, Home/End,
+/// PageUp/PageDown, Delete, Insert. The buffer no longer describes the
+/// screen, so the caller clears it instead of recording.
+pub fn is_navigation(scancode: u16) -> bool {
+    scancode == KeyCode::KEY_LEFT.code()
+        || scancode == KeyCode::KEY_RIGHT.code()
+        || scancode == KeyCode::KEY_UP.code()
+        || scancode == KeyCode::KEY_DOWN.code()
+        || scancode == KeyCode::KEY_HOME.code()
+        || scancode == KeyCode::KEY_END.code()
+        || scancode == KeyCode::KEY_PAGEUP.code()
+        || scancode == KeyCode::KEY_PAGEDOWN.code()
+        || scancode == KeyCode::KEY_DELETE.code()
+        || scancode == KeyCode::KEY_INSERT.code()
+}
+
 /// Key name to scancode for `chord` combos: lowercase ASCII letters and
 /// top-row digits. Anything else is rejected at config load.
 pub fn scancode_by_name(name: &str) -> Option<u16> {
@@ -328,6 +351,34 @@ mod tests {
     fn escape_resets() {
         assert!(is_reset(KeyCode::KEY_ESC.code()));
         assert!(!is_reset(KeyCode::KEY_A.code()));
+    }
+
+    #[test]
+    fn backspace_is_detected() {
+        assert!(is_backspace(KeyCode::KEY_BACKSPACE.code()));
+        assert!(!is_backspace(KeyCode::KEY_A.code()));
+        assert!(!is_backspace(KeyCode::KEY_DELETE.code()));
+    }
+
+    #[test]
+    fn navigation_covers_cursor_and_forward_edit_keys() {
+        for code in [
+            KeyCode::KEY_LEFT.code(),
+            KeyCode::KEY_RIGHT.code(),
+            KeyCode::KEY_UP.code(),
+            KeyCode::KEY_DOWN.code(),
+            KeyCode::KEY_HOME.code(),
+            KeyCode::KEY_END.code(),
+            KeyCode::KEY_PAGEUP.code(),
+            KeyCode::KEY_PAGEDOWN.code(),
+            KeyCode::KEY_DELETE.code(),
+            KeyCode::KEY_INSERT.code(),
+        ] {
+            assert!(is_navigation(code), "code {code}");
+        }
+        assert!(!is_navigation(KeyCode::KEY_A.code()));
+        assert!(!is_navigation(KeyCode::KEY_BACKSPACE.code()));
+        assert!(!is_navigation(KeyCode::KEY_SPACE.code()));
     }
 
     #[test]
