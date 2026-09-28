@@ -16,6 +16,7 @@ mod selection;
 mod setup;
 mod trigger;
 mod undo;
+mod uninstall;
 
 use buffer::{BufferEntry, InputBuffer};
 use clipboard::Clipboard;
@@ -41,6 +42,7 @@ fn usage() -> ! {
     eprintln!("  convert-word           ask the running daemon to convert the last word");
     eprintln!("  convert-selection      ask the running daemon to convert the selection");
     eprintln!("  setup [--no-udev] [--dry-run]  install binary, unit, config, udev rule");
+    eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule (keeps config)");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("Double Shift converts the word, Shift+DoubleShift the phrase;");
     eprintln!("a lone Mod tap converts the word, Ctrl+Mod tap the selection;");
@@ -207,6 +209,7 @@ fn main() {
         | Some("convert-word")
         | Some("convert-selection")
         | Some("setup")
+        | Some("uninstall")
         | Some("doctor") => (raw[0].as_str(), &raw[1..]),
         _ => usage(),
     };
@@ -228,6 +231,24 @@ fn main() {
                 }
             };
             std::process::exit(setup::run(options, &paths, &setup::RealRunner));
+        }
+        "uninstall" => {
+            let mut options = setup::Options::default();
+            for arg in rest {
+                match arg.as_str() {
+                    "--no-udev" => options.no_udev = true,
+                    "--dry-run" => options.dry_run = true,
+                    _ => usage(),
+                }
+            }
+            let paths = match setup::resolve() {
+                Ok(paths) => paths,
+                Err(error) => {
+                    eprintln!("uninstall: {error}");
+                    std::process::exit(1);
+                }
+            };
+            std::process::exit(uninstall::run(options, &paths, &setup::RealRunner));
         }
         "doctor" => {
             if !rest.is_empty() {
