@@ -487,6 +487,26 @@ pub fn load_from(path: &Path) -> Result<LayoutPair, ConfigError> {
     parse(&text).map_err(|error| with_path(path, error))
 }
 
+/// Write the default config to `path` unless it already exists.
+/// Returns true when it wrote a fresh file.
+pub fn ensure_default_at(path: &Path) -> io::Result<bool> {
+    if path.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, DEFAULT_CONFIG)?;
+    Ok(true)
+}
+
+/// Write the default config to the default location unless one exists.
+/// Explicit `--config` overrides never auto-create: a wrong path must
+/// fail loudly instead of sprouting a default somewhere unexpected.
+pub fn ensure_default() -> io::Result<bool> {
+    ensure_default_at(&config_path())
+}
+
 /// Read and parse the default-location config.
 pub fn load() -> Result<LayoutPair, ConfigError> {
     load_from(&config_path())
@@ -887,5 +907,22 @@ mod tests {
         let error = load_from(&path).unwrap_err();
         assert!(error.to_string().contains("bad-config-test.kdl"), "{error}");
         std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn ensure_default_writes_once_and_parses() {
+        let dir = std::env::temp_dir().join("niri-punto-test-ensure");
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("sub").join("config.kdl");
+        assert!(ensure_default_at(&path).unwrap());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_CONFIG);
+        load_from(&path).unwrap();
+        std::fs::write(&path, "layout \"de\" \"fr\"\n").unwrap();
+        assert!(!ensure_default_at(&path).unwrap());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "layout \"de\" \"fr\"\n"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
