@@ -59,7 +59,10 @@ fn write_with(binary: &str, args: &[&str], text: &str) -> io::Result<()> {
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        // Never pipe stderr: wl-copy daemonizes, so a background server would
+        // inherit the pipe write-end and hold it open, leaving
+        // wait_with_output() blocked on EOF forever.
+        .stderr(Stdio::null())
         .spawn()
         .map_err(|error| {
             if error.kind() == io::ErrorKind::NotFound {
@@ -131,5 +134,16 @@ mod tests {
     fn write_reports_a_failing_binary() {
         let error = write_with("false", &[], "x").unwrap_err();
         assert!(error.to_string().contains("false"), "{error}");
+    }
+
+    #[test]
+    fn write_returns_without_waiting_for_a_forking_child() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        write_with("sh", &["-c", "sleep 15 >&2 &"], "x").unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "write_with blocked on a daemonized child"
+        );
     }
 }
