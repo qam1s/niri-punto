@@ -316,7 +316,17 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
 
     let pair = match &config_override {
         Some(path) => config::load_from(path),
-        None => config::load(),
+        None => {
+            match config::ensure_default() {
+                Ok(true) => eprintln!("config: wrote default {}", config::config_path().display()),
+                Ok(false) => {}
+                Err(error) => {
+                    eprintln!("config: cannot write default: {error}");
+                    std::process::exit(1);
+                }
+            }
+            config::load()
+        }
     };
     let pair = match pair {
         Ok(pair) => pair,

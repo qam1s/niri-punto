@@ -1,6 +1,6 @@
 //! `setup`: fresh-machine install without a package manager.
 
-use crate::config::{self, DEFAULT_CONFIG, MODULES_FILE_NAME, RULE_FILE_NAME};
+use crate::config::{self, MODULES_FILE_NAME, RULE_FILE_NAME};
 use crate::doctor;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -146,14 +146,7 @@ pub fn install_unit(dest: &Path) -> io::Result<()> {
 }
 
 pub fn write_default_config(dest: &Path) -> io::Result<bool> {
-    if dest.exists() {
-        return Ok(false);
-    }
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(dest, DEFAULT_CONFIG)?;
-    Ok(true)
+    config::ensure_default_at(dest)
 }
 
 fn shipped_contrib(exe: &Path, name: &str) -> Option<PathBuf> {
@@ -402,6 +395,7 @@ fn step(name: &str, dest: &Path, dry_run: bool, install: impl FnOnce() -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::DEFAULT_CONFIG;
     use std::cell::RefCell;
 
     struct FakeRunner {
