@@ -46,8 +46,15 @@ fn usage() -> ! {
     );
     eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule, cargo copy");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
+    eprintln!("  version                print the daemon version");
     eprintln!("niri binds (e.g. Mod+L) use the convert-* subcommands.");
     std::process::exit(2);
+}
+
+/// Print the version baked in at build time and exit.
+fn version() -> ! {
+    println!("niri-punto {}", env!("CARGO_PKG_VERSION"));
+    std::process::exit(0);
 }
 
 fn apply_plan(
@@ -214,12 +221,14 @@ fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = match raw.first().map(String::as_str) {
         None | Some("--input-dir") | Some("--config") => ("run", raw.as_slice()),
+        Some("--version") | Some("-V") => version(),
         Some("run")
         | Some("convert-word")
         | Some("convert-selection")
         | Some("setup")
         | Some("uninstall")
-        | Some("doctor") => (raw[0].as_str(), &raw[1..]),
+        | Some("doctor")
+        | Some("version") => (raw[0].as_str(), &raw[1..]),
         _ => usage(),
     };
     match command {
@@ -264,6 +273,12 @@ fn main() {
                 usage();
             }
             std::process::exit(doctor::run());
+        }
+        "version" => {
+            if !rest.is_empty() {
+                usage();
+            }
+            version();
         }
         "run" => {
             let mut input_dir = PathBuf::from("/dev/input");
@@ -317,6 +332,7 @@ fn client(kind: ControlKind) {
 }
 
 fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
+    eprintln!("niri-punto {}", env!("CARGO_PKG_VERSION"));
     let socket_path = control::socket_path();
     let listener = match control::bind(&socket_path) {
         Ok(listener) => listener,
