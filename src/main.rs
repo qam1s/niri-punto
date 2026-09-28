@@ -41,7 +41,9 @@ fn usage() -> ! {
     eprintln!("  run [--input-dir DIR] [--config PATH]  start the daemon (single instance)");
     eprintln!("  convert-word           ask the running daemon to convert the last word");
     eprintln!("  convert-selection      ask the running daemon to convert the selection");
-    eprintln!("  setup [--no-udev] [--dry-run]  install binary, unit, config, udev rule");
+    eprintln!(
+        "  setup [--no-udev] [--dry-run]  register this binary, install unit, config, udev rule"
+    );
     eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule (keeps config)");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("Double Shift converts the word, Shift+DoubleShift the phrase;");
