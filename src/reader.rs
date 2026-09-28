@@ -48,6 +48,10 @@ pub fn classify(scancode: u16) -> Key {
         Key::MetaLeft
     } else if scancode == KeyCode::KEY_RIGHTMETA.code() {
         Key::MetaRight
+    } else if scancode == KeyCode::KEY_LEFTALT.code() {
+        Key::AltLeft
+    } else if scancode == KeyCode::KEY_RIGHTALT.code() {
+        Key::AltRight
     } else {
         Key::Other
     }
@@ -87,6 +91,51 @@ pub fn is_navigation(scancode: u16) -> bool {
         || scancode == KeyCode::KEY_PAGEDOWN.code()
         || scancode == KeyCode::KEY_DELETE.code()
         || scancode == KeyCode::KEY_INSERT.code()
+}
+
+/// Action keys: F1 through F24. They trigger app or compositor actions
+/// (refresh, fullscreen, ...), so the screen state after them is
+/// unpredictable and the caller drops the history instead of recording.
+pub fn is_function(scancode: u16) -> bool {
+    scancode == KeyCode::KEY_F1.code()
+        || scancode == KeyCode::KEY_F2.code()
+        || scancode == KeyCode::KEY_F3.code()
+        || scancode == KeyCode::KEY_F4.code()
+        || scancode == KeyCode::KEY_F5.code()
+        || scancode == KeyCode::KEY_F6.code()
+        || scancode == KeyCode::KEY_F7.code()
+        || scancode == KeyCode::KEY_F8.code()
+        || scancode == KeyCode::KEY_F9.code()
+        || scancode == KeyCode::KEY_F10.code()
+        || scancode == KeyCode::KEY_F11.code()
+        || scancode == KeyCode::KEY_F12.code()
+        || scancode == KeyCode::KEY_F13.code()
+        || scancode == KeyCode::KEY_F14.code()
+        || scancode == KeyCode::KEY_F15.code()
+        || scancode == KeyCode::KEY_F16.code()
+        || scancode == KeyCode::KEY_F17.code()
+        || scancode == KeyCode::KEY_F18.code()
+        || scancode == KeyCode::KEY_F19.code()
+        || scancode == KeyCode::KEY_F20.code()
+        || scancode == KeyCode::KEY_F21.code()
+        || scancode == KeyCode::KEY_F22.code()
+        || scancode == KeyCode::KEY_F23.code()
+        || scancode == KeyCode::KEY_F24.code()
+}
+
+/// The CapsLock key itself: never text. CapsLock also flips the case
+/// semantics of later letters in ways the shift flag cannot model
+/// exactly (letters invert, digits do not), so the caller clears the
+/// history rather than replaying a wrong case.
+pub fn is_caps_lock(scancode: u16) -> bool {
+    scancode == KeyCode::KEY_CAPSLOCK.code()
+}
+
+/// Copy keys for the plain-copy exception: Ctrl+C and Ctrl+Insert move
+/// no text and no cursor, so the history survives them (every other
+/// Ctrl shortcut clears it: select-all, cut, paste, undo, ...).
+pub fn is_copy_key(scancode: u16) -> bool {
+    scancode == KeyCode::KEY_C.code() || scancode == KeyCode::KEY_INSERT.code()
 }
 
 /// Key name to scancode for `chord` combos: lowercase ASCII letters and
@@ -330,6 +379,8 @@ mod tests {
         assert_eq!(classify(KeyCode::KEY_RIGHTCTRL.code()), Key::CtrlRight);
         assert_eq!(classify(KeyCode::KEY_LEFTMETA.code()), Key::MetaLeft);
         assert_eq!(classify(KeyCode::KEY_RIGHTMETA.code()), Key::MetaRight);
+        assert_eq!(classify(KeyCode::KEY_LEFTALT.code()), Key::AltLeft);
+        assert_eq!(classify(KeyCode::KEY_RIGHTALT.code()), Key::AltRight);
         assert_eq!(classify(KeyCode::KEY_A.code()), Key::Other);
     }
 
@@ -358,6 +409,31 @@ mod tests {
         assert!(is_backspace(KeyCode::KEY_BACKSPACE.code()));
         assert!(!is_backspace(KeyCode::KEY_A.code()));
         assert!(!is_backspace(KeyCode::KEY_DELETE.code()));
+    }
+
+    #[test]
+    fn function_keys_are_detected() {
+        for code in [
+            KeyCode::KEY_F1.code(),
+            KeyCode::KEY_F5.code(),
+            KeyCode::KEY_F10.code(),
+            KeyCode::KEY_F11.code(),
+            KeyCode::KEY_F12.code(),
+        ] {
+            assert!(is_function(code), "code {code}");
+        }
+        assert!(!is_function(KeyCode::KEY_A.code()));
+        assert!(!is_function(KeyCode::KEY_BACKSPACE.code()));
+    }
+
+    #[test]
+    fn caps_lock_and_copy_keys_are_detected() {
+        assert!(is_caps_lock(KeyCode::KEY_CAPSLOCK.code()));
+        assert!(!is_caps_lock(KeyCode::KEY_A.code()));
+        assert!(is_copy_key(KeyCode::KEY_C.code()));
+        assert!(is_copy_key(KeyCode::KEY_INSERT.code()));
+        assert!(!is_copy_key(KeyCode::KEY_X.code()));
+        assert!(!is_copy_key(KeyCode::KEY_V.code()));
     }
 
     #[test]
@@ -426,6 +502,8 @@ mod tests {
         assert!(!is_typing_key(Key::ShiftLeft, 1));
         assert!(!is_typing_key(Key::CtrlLeft, 1));
         assert!(!is_typing_key(Key::MetaLeft, 1));
+        assert!(!is_typing_key(Key::AltLeft, 1));
+        assert!(!is_typing_key(Key::AltRight, 1));
     }
 
     #[test]

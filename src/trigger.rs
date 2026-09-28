@@ -46,6 +46,10 @@ pub enum Key {
     CtrlRight,
     MetaLeft,
     MetaRight,
+    /// Alt sides: tracked so the buffer can tell menu shortcuts
+    /// (left Alt) from AltGr text input (right Alt, `menu_alt_held`).
+    AltLeft,
+    AltRight,
     Other,
 }
 
@@ -157,13 +161,15 @@ impl Side {
 /// returns `Some(Gesture)` exactly at the second Shift press that completes
 /// a trigger, or at the Mod release that completes a tap — `None`
 /// otherwise. Autorepeat (press while already down) and bounce faster than
-/// [`DEBOUNCE_MS`] are ignored. Any non-modifier press between the two
-/// Shift presses cancels the pending pair; a tap needs a clean
-/// press-to-release with no Shift, text, or second-Mod key in between.
+/// [`DEBOUNCE_MS`] are ignored. Any text, edit, or action press between the
+/// two Shift presses cancels the pending pair (Alt never does: Alt+Tab
+/// switches windows); a tap needs a clean press-to-release with no Shift,
+/// text, or second-Mod key in between.
 pub struct TriggerMachine {
     shift_down: [bool; 2],
     ctrl_down: [bool; 2],
     meta_down: [bool; 2],
+    alt_down: [bool; 2],
     first_press_ms: Option<u64>,
     disturbed: bool,
     last_release_ms: [Option<u64>; 2],
@@ -186,6 +192,7 @@ impl TriggerMachine {
             shift_down: [false, false],
             ctrl_down: [false, false],
             meta_down: [false, false],
+            alt_down: [false, false],
             first_press_ms: None,
             disturbed: false,
             last_release_ms: [None, None],
@@ -215,6 +222,19 @@ impl TriggerMachine {
     /// in the compositor's binds instead of the text field.
     pub fn meta_held(&self) -> bool {
         self.meta_down[0] || self.meta_down[1]
+    }
+
+    /// Either Alt side held: replaying under Alt sends menu shortcuts,
+    /// so this blocks replay like the other modifiers.
+    pub fn alt_held(&self) -> bool {
+        self.alt_down[0] || self.alt_down[1]
+    }
+
+    /// Left Alt held: the menu/layout key. Right Alt is AltGr on many
+    /// layouts and produces text, so the clear-on-shortcut rule keys off
+    /// the left side only.
+    pub fn menu_alt_held(&self) -> bool {
+        self.alt_down[Side::Left.index()]
     }
 
     /// Lone-Mod-tap scope from a bare-`Mod` bind; `None` disables the tap.
@@ -264,10 +284,10 @@ impl TriggerMachine {
             && (!mods.ctrl || self.ctrl_held())
     }
 
-    /// No Shift, Ctrl, or Mod held anywhere: replaying scancodes now renders
+    /// No Shift, Ctrl, Mod, or Alt held anywhere: replaying scancodes now renders
     /// exactly what the buffer holds, with no held-modifier interference.
     pub fn modifiers_free(&self) -> bool {
-        !self.shift_held() && !self.ctrl_held() && !self.meta_held()
+        !self.shift_held() && !self.ctrl_held() && !self.meta_held() && !self.alt_held()
     }
 
     pub fn key(&mut self, key: Key, pressed: bool, now_ms: u64) -> Option<Gesture> {
@@ -284,6 +304,14 @@ impl TriggerMachine {
             }
             Key::MetaLeft => self.meta(Side::Left, pressed, now_ms),
             Key::MetaRight => self.meta(Side::Right, pressed, now_ms),
+            Key::AltLeft => {
+                self.alt_down[Side::Left.index()] = pressed;
+                None
+            }
+            Key::AltRight => {
+                self.alt_down[Side::Right.index()] = pressed;
+                None
+            }
             Key::Other => {
                 if pressed {
                     self.disturbed = true;
@@ -616,6 +644,46 @@ mod tests {
         assert_eq!(press(&mut m, Key::CtrlLeft, T + 100), None);
         assert_eq!(release(&mut m, Key::CtrlLeft, T + 130), None);
         // Ctrl was released again: still a plain word gesture.
+        let g = press(&mut m, Key::ShiftLeft, T + 150);
+        assert!(matches!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Word,
+                undo: false
+            })
+        ));
+    }
+
+    #[test]
+    fn alt_sides_track_separately_and_block_replay() {
+        let mut m = TriggerMachine::new();
+        assert!(!m.alt_held());
+        assert!(!m.menu_alt_held());
+        assert!(m.modifiers_free());
+        assert_eq!(press(&mut m, Key::AltLeft, T), None);
+        assert!(m.alt_held());
+        assert!(m.menu_alt_held());
+        assert!(!m.modifiers_free());
+        assert_eq!(release(&mut m, Key::AltLeft, T + 50), None);
+        assert!(!m.alt_held());
+        // Right Alt (AltGr) tracks without counting as the menu key.
+        assert_eq!(press(&mut m, Key::AltRight, T + 100), None);
+        assert!(m.alt_held());
+        assert!(!m.menu_alt_held());
+        assert!(!m.modifiers_free());
+        assert_eq!(release(&mut m, Key::AltRight, T + 150), None);
+        assert!(m.modifiers_free());
+    }
+
+    #[test]
+    fn alt_between_shifts_keeps_the_pair() {
+        // Alt+Shift is the layout-switch chord: it must not break
+        // a pending pair the way text keys do.
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
+        assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
+        assert_eq!(press(&mut m, Key::AltLeft, T + 100), None);
+        assert_eq!(release(&mut m, Key::AltLeft, T + 130), None);
         let g = press(&mut m, Key::ShiftLeft, T + 150);
         assert!(matches!(
             g,

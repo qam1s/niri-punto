@@ -677,18 +677,6 @@ fn handle_key_at(
         converter.invalidate();
         selection_converter.invalidate();
         *pending = None;
-        // Anchor the fill to the layout it is typed under (one IPC query
-        // per fill): a confident verdict only overrides the current layout
-        // when the layout moved since typing (external switch). Edits and
-        // cursor moves carry no layout of their own, so they never anchor.
-        if !reader::is_backspace(raw.scancode)
-            && !reader::is_navigation(raw.scancode)
-            && buffer.birth_layout().is_none()
-        {
-            if let Ok((current, _)) = ipc.current_layout() {
-                buffer.note_birth(current);
-            }
-        }
         if reader::is_backspace(raw.scancode) {
             // Mirror the screen edit instead of recording it: a plain
             // Backspace drops one entry per press and per autorepeat,
@@ -700,6 +688,12 @@ fn handle_key_at(
             } else {
                 buffer.pop();
             }
+        } else if triggers.ctrl_held()
+            && !triggers.shift_held()
+            && reader::is_copy_key(raw.scancode)
+        {
+            // Plain Ctrl+C / Ctrl+Insert: moves no text and no cursor,
+            // so the history survives — but there is nothing to record.
         } else if reader::is_navigation(raw.scancode) {
             // The cursor moved (or text changed ahead of it): the buffer
             // no longer describes the screen, so drop it rather than
@@ -708,23 +702,52 @@ fn handle_key_at(
             if raw.value == 1 {
                 eprintln!("buffer: cleared (cursor moved)");
             }
-        } else if raw.value == 1 {
-            if reader::is_reset(raw.scancode) {
-                buffer.clear();
-                eprintln!("buffer: cleared (esc)");
+        } else if reader::is_function(raw.scancode)
+            || reader::is_caps_lock(raw.scancode)
+            || triggers.meta_held()
+            || triggers.menu_alt_held()
+            || triggers.ctrl_held()
+        {
+            // Action keys and app/compositor shortcuts (select-all, cut,
+            // paste, undo, Alt+letter menus, Mod+letter actions, CapsLock
+            // with its unmodellable case flip): the text, the selection,
+            // or the case semantics changed behind our back, so drop the
+            // history. Only CapsLock and F-keys reach this as bare
+            // presses; the rest arrive with a modifier held. Right Alt
+            // (AltGr) is excluded on purpose: it produces text.
+            buffer.clear();
+            if raw.value == 1 {
+                eprintln!("buffer: cleared (shortcut or action key)");
+            }
+        } else {
+            // Anchor the fill to the layout it is typed under (one IPC
+            // query per fill): a confident verdict only overrides the
+            // current layout when the layout moved since typing
+            // (external switch). Only recorded text anchors — edits,
+            // shortcuts, and cursor moves carry no layout of their own.
+            if buffer.birth_layout().is_none() {
+                if let Ok((current, _)) = ipc.current_layout() {
+                    buffer.note_birth(current);
+                }
+            }
+            if raw.value == 1 {
+                if reader::is_reset(raw.scancode) {
+                    buffer.clear();
+                    eprintln!("buffer: cleared (esc)");
+                } else {
+                    buffer.push(reader::buffer_entry_for(
+                        raw.scancode,
+                        triggers.shift_held(),
+                    ));
+                }
             } else {
+                // Autorepeat: the character repeats on screen, so it
+                // repeats in the buffer too.
                 buffer.push(reader::buffer_entry_for(
                     raw.scancode,
                     triggers.shift_held(),
                 ));
             }
-        } else {
-            // Autorepeat: the character repeats on screen, so it repeats
-            // in the buffer too.
-            buffer.push(reader::buffer_entry_for(
-                raw.scancode,
-                triggers.shift_held(),
-            ));
         }
     }
 
@@ -970,6 +993,15 @@ mod tests {
     const CTRL: u16 = KeyCode::KEY_LEFTCTRL.code();
     const BACKSPACE: u16 = KeyCode::KEY_BACKSPACE.code();
     const LEFT: u16 = KeyCode::KEY_LEFT.code();
+    const ALT: u16 = KeyCode::KEY_LEFTALT.code();
+    const ALTGR: u16 = KeyCode::KEY_RIGHTALT.code();
+    const CAPS: u16 = KeyCode::KEY_CAPSLOCK.code();
+    const F5: u16 = KeyCode::KEY_F5.code();
+    const KEY_A: u16 = KeyCode::KEY_A.code();
+    const KEY_C: u16 = KeyCode::KEY_C.code();
+    const KEY_X: u16 = KeyCode::KEY_X.code();
+    const KEY_V: u16 = KeyCode::KEY_V.code();
+    const KEY_L: u16 = KeyCode::KEY_L.code();
     /// Mod (Super): held during a Mod+L bind, invisible to the trigger
     /// machine until the fix.
     const SUPER: u16 = KeyCode::KEY_LEFTMETA.code();
@@ -1241,6 +1273,82 @@ mod tests {
         assert!(!h.buffer.phrase().is_empty());
         h.tap(T + 500, LEFT);
         assert!(h.buffer.phrase().is_empty());
+    }
+
+    #[test]
+    fn ctrl_select_cut_and_paste_clear_the_buffer() {
+        // Ctrl+A/X/V change the selection or the text behind our back:
+        // the history is dropped instead of replayed stale.
+        for key in [KEY_A, KEY_X, KEY_V] {
+            let mut h = Harness::new();
+            h.type_word(T);
+            h.at(T + 500, CTRL, 1);
+            h.tap(T + 520, key);
+            h.at(T + 540, CTRL, 0);
+            assert!(h.buffer.phrase().is_empty(), "key {key}");
+            h.double_shift(T + 900);
+            assert!(h.injector.erases.is_empty(), "key {key}");
+        }
+    }
+
+    #[test]
+    fn ctrl_copy_keeps_the_buffer() {
+        // Ctrl+C / Ctrl+Insert move nothing: history survives, and the
+        // shortcut letter itself is not recorded.
+        for key in [KEY_C, KeyCode::KEY_INSERT.code()] {
+            let mut h = Harness::new();
+            h.type_word(T);
+            h.at(T + 500, CTRL, 1);
+            h.tap(T + 520, key);
+            h.at(T + 540, CTRL, 0);
+            let codes: Vec<u16> = h.buffer.phrase().iter().map(|e| e.scancode).collect();
+            assert_eq!(codes, WORD.to_vec(), "key {key}");
+            h.double_shift(T + 900);
+            assert_eq!(h.injector.erases, vec![6], "key {key}");
+        }
+    }
+
+    #[test]
+    fn function_and_caps_lock_clear_the_buffer() {
+        for key in [F5, CAPS] {
+            let mut h = Harness::new();
+            h.type_word(T);
+            h.tap(T + 500, key);
+            assert!(h.buffer.phrase().is_empty(), "key {key}");
+        }
+    }
+
+    #[test]
+    fn alt_letter_clears_but_altgr_letter_records() {
+        // Left Alt+letter opens menus: drop the history. Right Alt is
+        // AltGr on many layouts and produces text: record it.
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.at(T + 500, ALT, 1);
+        h.tap(T + 520, KEY_A);
+        h.at(T + 540, ALT, 0);
+        assert!(h.buffer.phrase().is_empty());
+
+        let mut h = Harness::new();
+        h.at(T, ALTGR, 1);
+        h.tap(T + 20, KEY_A);
+        h.at(T + 40, ALTGR, 0);
+        let codes: Vec<u16> = h.buffer.phrase().iter().map(|e| e.scancode).collect();
+        assert_eq!(codes, vec![KEY_A]);
+    }
+
+    #[test]
+    fn meta_letter_clears_without_gesturing() {
+        // A compositor shortcut (Mod+letter) is never text: the letter
+        // is dropped, and it voids the lone-Mod tap instead of firing it.
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.at(T + 500, SUPER, 1);
+        h.tap(T + 520, KEY_L);
+        h.at(T + 540, SUPER, 0);
+        assert!(h.buffer.phrase().is_empty());
+        assert!(h.injector.erases.is_empty());
+        assert!(h.ipc.switches.is_empty());
     }
 
     /// `ghbdtn` in true keystroke order (g,h,b,d,t,n): Ru-confident for
