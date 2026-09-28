@@ -7,12 +7,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 /// Default config written by `setup`. Never overwrites an existing file.
-pub const DEFAULT_CONFIG: &str = r#"// niri-punto config. The ordered layout pair: position maps to the niri
-layout "us" "ru"
+/// Mirrors the README example byte-for-byte (a test enforces this).
+pub const DEFAULT_CONFIG: &str = r#"layout "us" "ru"
+
 binds {
     Mod word
-    Double-Shift word
+    Mod+Shift phrase
+    Double-Shift phrase
 }
+
 timings {
     double-shift-ms 400
     undo-ms 3000
@@ -189,7 +192,7 @@ impl Default for TriggerSettings {
         Self {
             tap_action: Some(GestureKind::Word),
             binds: Vec::new(),
-            pair_base: GestureKind::Word,
+            pair_base: GestureKind::Phrase,
             timing: TimingConfig::default(),
         }
     }
@@ -680,15 +683,32 @@ mod tests {
         let settings = parse_settings("layout \"us\" \"ru\"\n").unwrap();
         assert_eq!(settings.tap_action, Some(GestureKind::Word));
         assert!(settings.binds.is_empty());
-        assert_eq!(settings.pair_base, GestureKind::Word);
+        assert_eq!(settings.pair_base, GestureKind::Phrase);
     }
 
     #[test]
     fn default_config_settings_parse() {
         let settings = parse_settings(DEFAULT_CONFIG).unwrap();
         assert_eq!(settings.tap_action, Some(GestureKind::Word));
-        assert!(settings.binds.is_empty());
-        assert_eq!(settings.pair_base, GestureKind::Word);
+        assert_eq!(settings.pair_base, GestureKind::Phrase);
+        assert_eq!(settings.timing, TimingConfig::default());
+        assert_eq!(settings.binds.len(), 2);
+        assert!(
+            settings
+                .binds
+                .iter()
+                .all(|bind| bind.kind == GestureKind::Phrase)
+        );
+        assert!(settings.binds.iter().all(|bind| bind.mods.meta));
+    }
+
+    #[test]
+    fn default_config_mirrors_the_readme_example() {
+        let readme = include_str!("../README.md");
+        assert!(
+            readme.contains(DEFAULT_CONFIG),
+            "DEFAULT_CONFIG drifted from the README example"
+        );
     }
 
     #[test]
@@ -753,10 +773,10 @@ mod tests {
     #[test]
     fn double_shift_line_sets_pair_base() {
         let settings = parse_settings("layout \"us\" \"ru\"\n").unwrap();
-        assert_eq!(settings.pair_base, GestureKind::Word);
-        let settings =
-            parse_settings("layout \"us\" \"ru\"\nbinds {\n double-shift phrase\n}\n").unwrap();
         assert_eq!(settings.pair_base, GestureKind::Phrase);
+        let settings =
+            parse_settings("layout \"us\" \"ru\"\nbinds {\n double-shift word\n}\n").unwrap();
+        assert_eq!(settings.pair_base, GestureKind::Word);
         assert!(parse_settings("layout \"us\" \"ru\"\nbinds {\n double-shift turbo\n}\n").is_err());
         assert!(
             parse_settings(

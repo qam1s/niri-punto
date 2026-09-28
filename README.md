@@ -30,7 +30,7 @@ cargo install --git https://github.com/qam1s/niri-punto --locked && ~/.cargo/bin
 | -------------- | --------- | ---------------------------------------- |
 | Mod            | word      | Convert word or switch layout when empty |
 | Mod + Shift    | phrase    | Convert phrase                           |
-| Double Shift   | word      | Convert word                             |
+| Double Shift   | phrase    | Convert phrase                           |
 | Repeat gesture | undo      | Undo previous conversion                 |
 
 ## Config
@@ -43,7 +43,7 @@ layout "us" "ru"
 binds {
     Mod word
     Mod+Shift phrase
-    Double-Shift word
+    Double-Shift phrase
 }
 
 timings {
