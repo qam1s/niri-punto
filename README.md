@@ -32,20 +32,21 @@ like a bad `layout` node.
 Requirements: [niri](https://github.com/niri-wm/niri),
 [wl-clipboard](https://github.com/bugaevc/wl-clipboard).
 
-1. Download `niri-punto-<version>-x86_64-unknown-linux-gnu.tar.gz` from the
-   [Releases page](https://github.com/qam1s/niri-punto/releases) and verify
-   the `.sha256` checksum.
-2. Extract and run `./niri-punto setup`. Everything installs at user level
-   (binary, systemd unit, default config); only the udev rule, the
-   modules-load entry and the driver load need root, `setup` escalates
-   just those steps (or pass `--no-udev` and install them by hand).
-
-Or via cargo (needs a Rust toolchain):
+Via cargo (needs a Rust toolchain):
 
 ```sh
 cargo install --git https://github.com/qam1s/niri-punto --locked
 niri-punto setup
 ```
+
+Everything installs at user level (binary, systemd unit, default config);
+only the udev rule, the modules-load entry and the driver load need root,
+`setup` escalates just those steps (or pass `--no-udev` and install them
+by hand).
+
+Alternatively, download `niri-punto-<version>-x86_64-unknown-linux-gnu.tar.gz`
+from the [Releases page](https://github.com/qam1s/niri-punto/releases)
+(verify the `.sha256` checksum), extract and run `./niri-punto setup`.
 
 ## Usage
 
