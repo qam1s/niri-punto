@@ -22,8 +22,7 @@ and needs [wl-clipboard](https://github.com/bugaevc/wl-clipboard).
 ## Install
 
 ```sh
-cargo install --git https://github.com/qam1s/niri-punto --locked
-niri-punto setup
+cargo install --git https://github.com/qam1s/niri-punto --locked && ~/.cargo/bin/niri-punto setup
 ```
 
 Or, download `.tar.gz`
