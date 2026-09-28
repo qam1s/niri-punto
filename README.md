@@ -25,10 +25,6 @@ and needs [wl-clipboard](https://github.com/bugaevc/wl-clipboard).
 cargo install --git https://github.com/qam1s/niri-punto --locked && ~/.cargo/bin/niri-punto setup
 ```
 
-Or, download `.tar.gz`
-from the [Releases page](https://github.com/qam1s/niri-punto/releases)
-(verify the `.sha256` checksum), extract and run `./niri-punto setup`.
-
 ## Usage
 
 | Gesture        | Action    | Description                              |
