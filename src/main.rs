@@ -993,6 +993,7 @@ mod tests {
     const CTRL: u16 = KeyCode::KEY_LEFTCTRL.code();
     const BACKSPACE: u16 = KeyCode::KEY_BACKSPACE.code();
     const LEFT: u16 = KeyCode::KEY_LEFT.code();
+    const FN: u16 = KeyCode::KEY_FN.code();
     const ALT: u16 = KeyCode::KEY_LEFTALT.code();
     const ALTGR: u16 = KeyCode::KEY_RIGHTALT.code();
     const CAPS: u16 = KeyCode::KEY_CAPSLOCK.code();
@@ -1273,6 +1274,26 @@ mod tests {
         assert!(!h.buffer.phrase().is_empty());
         h.tap(T + 500, LEFT);
         assert!(h.buffer.phrase().is_empty());
+    }
+
+    #[test]
+    fn fn_press_neither_records_nor_breaks_the_gesture() {
+        // Laptop caret moves (Fn+Left is Home): the Fn key itself must
+        // leave no trace in the buffer and no mark on the trigger state.
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.tap(T + 500, FN);
+        let codes: Vec<u16> = h.buffer.phrase().iter().map(|e| e.scancode).collect();
+        assert_eq!(codes, WORD.to_vec());
+        h.double_shift(T + 800);
+        assert_eq!(h.injector.erases, vec![6]);
+        assert_eq!(
+            h.injector.replays[0]
+                .iter()
+                .map(|e| e.scancode)
+                .collect::<Vec<_>>(),
+            WORD.to_vec()
+        );
     }
 
     #[test]

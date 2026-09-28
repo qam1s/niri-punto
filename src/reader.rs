@@ -52,6 +52,8 @@ pub fn classify(scancode: u16) -> Key {
         Key::AltLeft
     } else if scancode == KeyCode::KEY_RIGHTALT.code() {
         Key::AltRight
+    } else if scancode == KeyCode::KEY_FN.code() {
+        Key::Fn
     } else {
         Key::Other
     }
@@ -381,6 +383,7 @@ mod tests {
         assert_eq!(classify(KeyCode::KEY_RIGHTMETA.code()), Key::MetaRight);
         assert_eq!(classify(KeyCode::KEY_LEFTALT.code()), Key::AltLeft);
         assert_eq!(classify(KeyCode::KEY_RIGHTALT.code()), Key::AltRight);
+        assert_eq!(classify(KeyCode::KEY_FN.code()), Key::Fn);
         assert_eq!(classify(KeyCode::KEY_A.code()), Key::Other);
     }
 
@@ -504,6 +507,8 @@ mod tests {
         assert!(!is_typing_key(Key::MetaLeft, 1));
         assert!(!is_typing_key(Key::AltLeft, 1));
         assert!(!is_typing_key(Key::AltRight, 1));
+        assert!(!is_typing_key(Key::Fn, 1));
+        assert!(!is_typing_key(Key::Fn, 2));
     }
 
     #[test]

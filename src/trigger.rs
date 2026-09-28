@@ -37,7 +37,8 @@ impl Default for TimingConfig {
     }
 }
 
-/// Keys the machine cares about. Everything else is [`Key::Other`].
+/// Keys the machine cares about. Everything else is [`Key::Other`],
+/// except [`Key::Fn`] below.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
     ShiftLeft,
@@ -46,6 +47,10 @@ pub enum Key {
     CtrlRight,
     MetaLeft,
     MetaRight,
+    /// Fn: emits events on some keyboards (Apple) but carries no text
+    /// and no gesture meaning — always ignored, so it neither disturbs
+    /// a pending pair/tap nor reaches the buffer.
+    Fn,
     /// Alt sides: tracked so the buffer can tell menu shortcuts
     /// (left Alt) from AltGr text input (right Alt, `menu_alt_held`).
     AltLeft,
@@ -162,9 +167,9 @@ impl Side {
 /// a trigger, or at the Mod release that completes a tap — `None`
 /// otherwise. Autorepeat (press while already down) and bounce faster than
 /// [`DEBOUNCE_MS`] are ignored. Any text, edit, or action press between the
-/// two Shift presses cancels the pending pair (Alt never does: Alt+Tab
-/// switches windows); a tap needs a clean press-to-release with no Shift,
-/// text, or second-Mod key in between.
+/// two Shift presses cancels the pending pair (Alt and Fn never do:
+/// Alt+Tab switches windows, Fn+arrows move the caret); a tap needs a clean
+/// press-to-release with no Shift, text, or second-Mod key in between.
 pub struct TriggerMachine {
     shift_down: [bool; 2],
     ctrl_down: [bool; 2],
@@ -304,6 +309,7 @@ impl TriggerMachine {
             }
             Key::MetaLeft => self.meta(Side::Left, pressed, now_ms),
             Key::MetaRight => self.meta(Side::Right, pressed, now_ms),
+            Key::Fn => None,
             Key::AltLeft => {
                 self.alt_down[Side::Left.index()] = pressed;
                 None
@@ -645,6 +651,37 @@ mod tests {
         assert_eq!(release(&mut m, Key::CtrlLeft, T + 130), None);
         // Ctrl was released again: still a plain word gesture.
         let g = press(&mut m, Key::ShiftLeft, T + 150);
+        assert!(matches!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Word,
+                undo: false
+            })
+        ));
+    }
+
+    #[test]
+    fn fn_press_neither_cancels_the_pair_nor_voids_the_tap() {
+        // Fn carries no text: it must not disturb a pending pair ...
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
+        assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
+        assert_eq!(press(&mut m, Key::Fn, T + 100), None);
+        assert_eq!(release(&mut m, Key::Fn, T + 130), None);
+        let g = press(&mut m, Key::ShiftLeft, T + 150);
+        assert!(matches!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Word,
+                undo: false
+            })
+        ));
+        // ... nor a lone Mod tap (Fn+Left is Home on laptop keyboards).
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::MetaLeft, T), None);
+        assert_eq!(press(&mut m, Key::Fn, T + 50), None);
+        assert_eq!(release(&mut m, Key::Fn, T + 80), None);
+        let g = release(&mut m, Key::MetaLeft, T + 100);
         assert!(matches!(
             g,
             Some(Gesture {
