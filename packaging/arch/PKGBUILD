@@ -1,0 +1,40 @@
+# Maintainer: qam1s
+pkgname=niri-punto
+pkgver=0.3.1
+pkgrel=1
+pkgdesc="Keyboard layout corrector for the niri Wayland compositor"
+arch=('x86_64')
+url="https://github.com/qam1s/niri-punto"
+license=('GPL-3.0-or-later')
+depends=('glibc')
+makedepends=('cargo')
+optdepends=('wl-clipboard: selection conversion via clipboard')
+install=niri-punto.install
+source=("$pkgname-$pkgver.tar.gz::https://github.com/qam1s/niri-punto/archive/v$pkgver.tar.gz")
+sha256sums=('8b9ac0716e4d7da45f59f3751b02ec19f27b74a5d9e7a6bfc332879a4f5d9ad3')
+
+prepare() {
+	export RUSTUP_TOOLCHAIN=stable
+	cargo fetch --locked --target "$CARCH-unknown-linux-gnu" --manifest-path "$pkgname-$pkgver/Cargo.toml"
+}
+
+build() {
+	export RUSTUP_TOOLCHAIN=stable
+	export CARGO_TARGET_DIR=target
+	cargo build --frozen --release --manifest-path "$pkgname-$pkgver/Cargo.toml"
+}
+
+check() {
+	export RUSTUP_TOOLCHAIN=stable
+	cargo test --frozen --manifest-path "$pkgname-$pkgver/Cargo.toml"
+}
+
+package() {
+	cd "$pkgname-$pkgver"
+	install -Dm0755 -t "$pkgdir/usr/bin/" "target/release/niri-punto"
+	install -Dm0644 "contrib/70-niri-punto.rules" "$pkgdir/usr/lib/udev/rules.d/70-niri-punto.rules"
+	install -Dm0644 "contrib/niri-punto.conf" "$pkgdir/usr/lib/modules-load.d/niri-punto.conf"
+	install -Dm0644 "contrib/niri-punto.service" "$pkgdir/usr/lib/systemd/user/niri-punto.service"
+	sed -i 's|%h/.local/bin/niri-punto|/usr/bin/niri-punto|' "$pkgdir/usr/lib/systemd/user/niri-punto.service"
+	install -Dm0644 "LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
