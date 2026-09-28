@@ -17,6 +17,18 @@ pub const STALE_RULE_DEST: &str = "/etc/udev/rules.d/99-niri-punto.rules";
 
 pub const SERVICE_FILE_NAME: &str = "niri-punto.service";
 
+/// System binary dir owned by a package manager. A `setup` running from
+/// here skips the binary, unit and udev steps (the package owns those
+/// files) and only manages the default config.
+pub const PACKAGED_BIN_DIR: &str = "/usr/bin";
+
+/// Whether `exe` runs from a packaged install (e.g. `/usr/bin/niri-punto`
+/// from the AUR package) rather than a user-local copy.
+pub fn is_packaged(exe: &Path) -> bool {
+    exe.parent()
+        .is_some_and(|dir| dir == Path::new(PACKAGED_BIN_DIR))
+}
+
 /// CLI flags for `setup`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Options {
@@ -238,8 +250,17 @@ pub fn staging_dir() -> PathBuf {
 
 /// Run the install. Returns the process exit code.
 pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
+    let packaged = is_packaged(&paths.exe);
+    if packaged {
+        println!(
+            "packaged install detected ({}): managing the config only",
+            paths.exe.display()
+        );
+    }
     let binary_dest = paths.bin_dir.join("niri-punto");
-    if !options.dry_run && is_same_file(&paths.exe, &binary_dest) {
+    if packaged {
+        println!("binary: owned by the package, skipped");
+    } else if !options.dry_run && is_same_file(&paths.exe, &binary_dest) {
         println!("binary: already in place at {}", binary_dest.display());
     } else if !step("binary", &binary_dest, options.dry_run, || {
         install_binary(&paths.exe, &binary_dest)
@@ -247,7 +268,9 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
         return 1;
     }
 
-    if !step("unit", &paths.unit_path, options.dry_run, || {
+    if packaged {
+        println!("unit: owned by the package, skipped");
+    } else if !step("unit", &paths.unit_path, options.dry_run, || {
         install_unit(&paths.unit_path)
     }) {
         return 1;
@@ -269,43 +292,47 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
         }
     }
 
-    let rule_src = if options.dry_run {
-        shipped_rule_src(&paths.exe).unwrap_or_else(|| staging_dir().join(RULE_FILE_NAME))
+    if packaged {
+        println!("udev rule: owned by the package, skipped");
     } else {
-        match rule_source(&paths.exe, &staging_dir()) {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("udev rule: {error}");
-                return 1;
+        let rule_src = if options.dry_run {
+            shipped_rule_src(&paths.exe).unwrap_or_else(|| staging_dir().join(RULE_FILE_NAME))
+        } else {
+            match rule_source(&paths.exe, &staging_dir()) {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("udev rule: {error}");
+                    return 1;
+                }
             }
-        }
-    };
-    let modules_src = if options.dry_run {
-        shipped_contrib(&paths.exe, MODULES_FILE_NAME)
-            .unwrap_or_else(|| staging_dir().join(MODULES_FILE_NAME))
-    } else {
-        match modules_source(&paths.exe, &staging_dir()) {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("modules entry: {error}");
-                return 1;
+        };
+        let modules_src = if options.dry_run {
+            shipped_contrib(&paths.exe, MODULES_FILE_NAME)
+                .unwrap_or_else(|| staging_dir().join(MODULES_FILE_NAME))
+        } else {
+            match modules_source(&paths.exe, &staging_dir()) {
+                Ok(path) => path,
+                Err(error) => {
+                    eprintln!("modules entry: {error}");
+                    return 1;
+                }
             }
-        }
-    };
-    if options.no_udev {
-        println!("udev rule: skipped (--no-udev); install by hand:");
-        println!("  {}", manual_udev_command(&rule_src, &modules_src));
-    } else {
-        println!("udev rule: needs root; escalating just this step");
-        for command in udev_commands(&rule_src, &modules_src) {
-            println!("+ {command}");
-            if let Err(error) = exec(runner, options.dry_run, &command) {
-                eprintln!("udev rule: {error}");
-                eprintln!(
-                    "  fallback: {}",
-                    manual_udev_command(&rule_src, &modules_src)
-                );
-                return 1;
+        };
+        if options.no_udev {
+            println!("udev rule: skipped (--no-udev); install by hand:");
+            println!("  {}", manual_udev_command(&rule_src, &modules_src));
+        } else {
+            println!("udev rule: needs root; escalating just this step");
+            for command in udev_commands(&rule_src, &modules_src) {
+                println!("+ {command}");
+                if let Err(error) = exec(runner, options.dry_run, &command) {
+                    eprintln!("udev rule: {error}");
+                    eprintln!(
+                        "  fallback: {}",
+                        manual_udev_command(&rule_src, &modules_src)
+                    );
+                    return 1;
+                }
             }
         }
     }
@@ -318,8 +345,10 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
         }
     }
 
-    if let Some(warning) = path_warning(&paths.bin_dir) {
-        println!("{warning}");
+    if !packaged {
+        if let Some(warning) = path_warning(&paths.bin_dir) {
+            println!("{warning}");
+        }
     }
     println!("verify: run `niri-punto doctor`");
     0
@@ -413,6 +442,36 @@ mod tests {
         let exe = fake_exe(&root);
         let paths = paths_for(&home, Some(root.join("xcfg").to_str().unwrap()), exe);
         (root, paths)
+    }
+
+    #[test]
+    fn packaged_exe_is_detected_by_its_dir() {
+        assert!(is_packaged(Path::new("/usr/bin/niri-punto")));
+        assert!(!is_packaged(Path::new("/home/u/.local/bin/niri-punto")));
+        assert!(!is_packaged(Path::new("/usr/local/bin/niri-punto")));
+        assert!(!is_packaged(Path::new("niri-punto")));
+    }
+
+    #[test]
+    fn packaged_run_manages_only_the_config() {
+        let root = scratch("setup-packaged");
+        let home = root.join("home");
+        let paths = paths_for(
+            &home,
+            Some(root.join("xcfg").to_str().unwrap()),
+            PathBuf::from("/usr/bin/niri-punto"),
+        );
+        let runner = FakeRunner::new();
+        assert_eq!(run(Options::default(), &paths, &runner), 0);
+        assert!(!paths.bin_dir.join("niri-punto").exists());
+        assert!(!paths.unit_path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&paths.config_path).unwrap(),
+            DEFAULT_CONFIG
+        );
+        let commands = runner.commands.borrow();
+        assert!(commands.iter().all(|command| command.prog != "sudo"));
+        assert_eq!(commands.len(), 2);
     }
 
     #[test]
