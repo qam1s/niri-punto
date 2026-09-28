@@ -39,12 +39,7 @@ cargo install --git https://github.com/qam1s/niri-punto --locked
 niri-punto setup
 ```
 
-Everything installs at user level (binary, systemd unit, default config);
-only the udev rule, the modules-load entry and the driver load need root,
-`setup` escalates just those steps (or pass `--no-udev` and install them
-by hand).
-
-Alternatively, download `niri-punto-<version>-x86_64-unknown-linux-gnu.tar.gz`
+Alternatively, download `.tar.gz`
 from the [Releases page](https://github.com/qam1s/niri-punto/releases)
 (verify the `.sha256` checksum), extract and run `./niri-punto setup`.
 
@@ -80,12 +75,6 @@ timings {
     tap-ms 300
 }
 ```
-
-## Development
-
-`just test` runs the test suite, `just lint` runs clippy and fmt checks.
-Install the pre-commit hooks once per clone with `prek install`.
-CI additionally runs `typos` and `cargo deny check advisories licenses`.
 
 ## License
 
