@@ -47,13 +47,6 @@ cargo install --git https://github.com/qam1s/niri-punto --locked
 niri-punto setup
 ```
 
-Or from the AUR (the `niri-punto` package, then `setup` for the default config):
-
-```sh
-yay -S niri-punto
-niri-punto setup
-```
-
 ## Usage
 
 | Gesture        | Action    | Description                              |
