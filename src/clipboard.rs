@@ -26,7 +26,8 @@ impl Clipboard for WlClipboard {
     }
 
     fn write_selection(&mut self, text: &str) -> io::Result<()> {
-        write_with("wl-copy", &[], text)
+        // Primary selection, not the clipboard: pasted via Shift+Insert.
+        write_with("wl-copy", &["--primary"], text)
     }
 }
 
