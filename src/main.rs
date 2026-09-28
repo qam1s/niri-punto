@@ -46,8 +46,6 @@ fn usage() -> ! {
     );
     eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule (keeps config)");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
-    eprintln!("Double Shift converts the word, Shift+DoubleShift the phrase;");
-    eprintln!("a lone Mod tap converts the word, Ctrl+Mod tap the selection;");
     eprintln!("niri binds (e.g. Mod+L) use the convert-* subcommands.");
     std::process::exit(2);
 }
