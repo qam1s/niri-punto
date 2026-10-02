@@ -41,6 +41,7 @@ fn usage() -> ! {
     );
     eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule, cargo copy");
     eprintln!("  update [--dry-run]              refresh the cargo install and restart");
+    eprintln!("  update-test [--branch NAME] [--dry-run]  install a test branch build and restart");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("  version                print the daemon version");
     eprintln!("niri binds (e.g. Mod+L) use the convert-word subcommand.");
@@ -152,7 +153,7 @@ fn main() {
         None | Some("--input-dir") | Some("--config") => ("run", raw.as_slice()),
         Some("--version") | Some("-V") => version(),
         Some("run") | Some("convert-word") | Some("setup") | Some("uninstall") | Some("update")
-        | Some("doctor") | Some("version") => (raw[0].as_str(), &raw[1..]),
+        | Some("update-test") | Some("doctor") | Some("version") => (raw[0].as_str(), &raw[1..]),
         _ => usage(),
     };
     match command {
@@ -214,6 +215,36 @@ fn main() {
                 }
             };
             std::process::exit(update::run(options, &paths, &setup::RealRunner));
+        }
+        "update-test" => {
+            let mut options = setup::Options::default();
+            let mut branch = update::TEST_BRANCH.to_string();
+            let mut rest = rest.iter();
+            while let Some(arg) = rest.next() {
+                match arg.as_str() {
+                    "--dry-run" => options.dry_run = true,
+                    "--branch" => {
+                        branch = rest
+                            .next()
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| usage());
+                    }
+                    _ => usage(),
+                }
+            }
+            let paths = match setup::resolve() {
+                Ok(paths) => paths,
+                Err(error) => {
+                    eprintln!("update-test: {error}");
+                    std::process::exit(1);
+                }
+            };
+            std::process::exit(update::run_test(
+                options,
+                &paths,
+                &setup::RealRunner,
+                &branch,
+            ));
         }
         "version" => {
             if !rest.is_empty() {
