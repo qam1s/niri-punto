@@ -33,3 +33,18 @@ jobs:
           files: |
             *.tar.gz
             *.tar.gz.sha256
+  publish:
+    needs: build
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # crates.io trusted publishing
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+      - run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
