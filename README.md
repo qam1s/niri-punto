@@ -23,13 +23,6 @@ keyboard keeps working.
 cargo install --git https://github.com/qam1s/niri-punto --locked && ~/.cargo/bin/niri-punto setup
 ```
 
-Test a branch before it reaches main, then go back:
-
-```sh
-niri-punto update-dev  # trial build from the dev branch
-niri-punto update  # back to main
-```
-
 ## Usage
 
 | Gesture        | Action | Description                                                  |
