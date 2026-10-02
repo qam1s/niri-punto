@@ -18,9 +18,28 @@ fn cmd(prog: &str, args: &[&str]) -> Command {
 /// Git source of the release the install docs point at.
 pub const REPO: &str = "https://github.com/qam1s/niri-punto";
 
+/// Branch `update-dev` installs: the standing branch for builds that
+/// are not ready for main yet.
+pub const TEST_BRANCH: &str = "dev";
+
 /// Rebuild the binary from the latest main.
 pub fn install_command() -> Command {
     cmd("cargo", &["install", "--git", REPO, "--locked"])
+}
+
+/// Rebuild the binary from the dev branch.
+pub fn install_dev_command() -> Command {
+    cmd(
+        "cargo",
+        &[
+            "install",
+            "--git",
+            REPO,
+            "--branch",
+            TEST_BRANCH,
+            "--locked",
+        ],
+    )
 }
 
 /// Pick up the rewritten unit file.
@@ -52,6 +71,16 @@ fn exec(runner: &dyn Runner, dry_run: bool, command: &Command) -> io::Result<()>
 
 /// Run the update. Returns the process exit code.
 pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
+    run_with(options, paths, runner, install_command())
+}
+
+/// Run the dev update: same steps, but the binary comes from the dev
+/// branch instead of main. Back to main with plain `update`.
+pub fn run_dev(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
+    run_with(options, paths, runner, install_dev_command())
+}
+
+fn run_with(options: Options, paths: &Paths, runner: &dyn Runner, install: Command) -> i32 {
     if setup::is_packaged(&paths.exe) {
         println!(
             "packaged install detected ({}): files belong to the package, \
@@ -60,7 +89,7 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
         );
         return 1;
     }
-    if let Err(error) = exec(runner, options.dry_run, &install_command()) {
+    if let Err(error) = exec(runner, options.dry_run, &install) {
         if error.kind() == io::ErrorKind::NotFound {
             eprintln!("update: cargo not found; install the Rust toolchain first");
         } else {
@@ -209,6 +238,53 @@ mod tests {
                 "--locked".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn install_dev_pulls_the_dev_branch() {
+        let command = install_dev_command();
+        assert_eq!(command.prog, "cargo");
+        assert_eq!(
+            command.args,
+            vec![
+                "install".to_string(),
+                "--git".to_string(),
+                REPO.to_string(),
+                "--branch".to_string(),
+                "dev".to_string(),
+                "--locked".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn dev_run_reinstalls_from_dev_then_restarts() {
+        let (_root, paths) = installed_paths("update-dev-run");
+        let cargo = scratch("update-dev-run-home");
+        std::fs::create_dir_all(cargo.join("bin")).unwrap();
+        let copy = cargo.join("bin").join("niri-punto");
+        std::fs::write(&copy, b"cargo-binary").unwrap();
+        let _env = CargoHomeGuard::point_at(&cargo);
+        let runner = FakeRunner::new();
+        let options = Options::default();
+        assert_eq!(run_dev(options, &paths, &runner), 0);
+        let unit = std::fs::read_to_string(&paths.unit_path).unwrap();
+        assert!(unit.contains(&format!("ExecStart={}", copy.display())));
+        let commands = runner.commands.borrow();
+        assert_eq!(commands.len(), 3);
+        assert_eq!(commands[0], install_dev_command());
+        assert_eq!(commands[1], reload_command());
+        assert_eq!(commands[2], restart_command());
+    }
+
+    #[test]
+    fn dev_run_refuses_packaged_installs() {
+        let (_root, mut paths) = installed_paths("update-dev-packaged");
+        paths.exe = PathBuf::from("/usr/bin/niri-punto");
+        let _env = CargoHomeGuard::empty("update-dev-packaged-home");
+        let runner = FakeRunner::new();
+        assert_eq!(run_dev(Options::default(), &paths, &runner), 1);
+        assert!(runner.commands.borrow().is_empty());
     }
 
     #[test]

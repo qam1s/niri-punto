@@ -41,6 +41,7 @@ fn usage() -> ! {
     );
     eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule, cargo copy");
     eprintln!("  update [--dry-run]              refresh the cargo install and restart");
+    eprintln!("  update-dev [--dry-run]          install the dev branch build and restart");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("  version                print the daemon version");
     eprintln!("niri binds (e.g. Mod+L) use the convert-word subcommand.");
@@ -152,7 +153,7 @@ fn main() {
         None | Some("--input-dir") | Some("--config") => ("run", raw.as_slice()),
         Some("--version") | Some("-V") => version(),
         Some("run") | Some("convert-word") | Some("setup") | Some("uninstall") | Some("update")
-        | Some("doctor") | Some("version") => (raw[0].as_str(), &raw[1..]),
+        | Some("update-dev") | Some("doctor") | Some("version") => (raw[0].as_str(), &raw[1..]),
         _ => usage(),
     };
     match command {
@@ -214,6 +215,23 @@ fn main() {
                 }
             };
             std::process::exit(update::run(options, &paths, &setup::RealRunner));
+        }
+        "update-dev" => {
+            let mut options = setup::Options::default();
+            for arg in rest {
+                match arg.as_str() {
+                    "--dry-run" => options.dry_run = true,
+                    _ => usage(),
+                }
+            }
+            let paths = match setup::resolve() {
+                Ok(paths) => paths,
+                Err(error) => {
+                    eprintln!("update-dev: {error}");
+                    std::process::exit(1);
+                }
+            };
+            std::process::exit(update::run_dev(options, &paths, &setup::RealRunner));
         }
         "version" => {
             if !rest.is_empty() {
@@ -622,7 +640,7 @@ fn handle_key_at(
                 }
                 return;
             }
-            if staged.tap && buffer.phrase().is_empty() {
+            if staged.tap && buffer.trailing_word(reader::is_word_boundary).is_empty() {
                 match ipc.current_layout() {
                     Ok((current, _)) => {
                         let target = if current == 0 { 1 } else { 0 };
@@ -1336,13 +1354,37 @@ mod tests {
     }
 
     #[test]
-    fn tap_with_only_a_trailing_space_does_not_toggle() {
+    fn tap_with_trailing_space_toggles_without_erasing() {
         let mut h = Harness::new();
         h.tap(T, KeyCode::KEY_SPACE.code());
         h.at(T + 500, SUPER, 1);
         h.at(T + 600, SUPER, 0);
-        assert!(h.ipc.switches.is_empty());
+        assert_eq!(h.ipc.switches, vec![1]);
         assert!(h.injector.erases.is_empty());
+    }
+
+    #[test]
+    fn tap_after_word_space_toggles_without_erasing() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.tap(T + 500, KeyCode::KEY_SPACE.code());
+        h.at(T + 800, SUPER, 1);
+        h.at(T + 900, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert!(h.injector.erases.is_empty());
+    }
+
+    #[test]
+    fn phrase_after_word_space_still_converts() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.tap(T + 500, KeyCode::KEY_SPACE.code());
+        h.at(T + 800, SUPER, 1);
+        h.at(T + 850, SHIFT, 1);
+        h.at(T + 900, SHIFT, 0);
+        h.at(T + 950, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.injector.erases, vec![7]);
     }
 
     #[test]
