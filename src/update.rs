@@ -18,8 +18,8 @@ fn cmd(prog: &str, args: &[&str]) -> Command {
 /// Git source of the release the install docs point at.
 pub const REPO: &str = "https://github.com/qam1s/niri-punto";
 
-/// Branch `update-test` installs when `--branch` is omitted: the standing
-/// branch for builds that are not ready for main yet.
+/// Branch `update-dev` installs: the standing branch for builds that
+/// are not ready for main yet.
 pub const TEST_BRANCH: &str = "dev";
 
 /// Rebuild the binary from the latest main.
@@ -27,11 +27,18 @@ pub fn install_command() -> Command {
     cmd("cargo", &["install", "--git", REPO, "--locked"])
 }
 
-/// Rebuild the binary from a test branch.
-pub fn install_test_command(branch: &str) -> Command {
+/// Rebuild the binary from the dev branch.
+pub fn install_dev_command() -> Command {
     cmd(
         "cargo",
-        &["install", "--git", REPO, "--branch", branch, "--locked"],
+        &[
+            "install",
+            "--git",
+            REPO,
+            "--branch",
+            TEST_BRANCH,
+            "--locked",
+        ],
     )
 }
 
@@ -67,10 +74,10 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
     run_with(options, paths, runner, install_command())
 }
 
-/// Run the test update: same steps, but the binary comes from `branch`
-/// instead of main. Back to main with plain `update`.
-pub fn run_test(options: Options, paths: &Paths, runner: &dyn Runner, branch: &str) -> i32 {
-    run_with(options, paths, runner, install_test_command(branch))
+/// Run the dev update: same steps, but the binary comes from the dev
+/// branch instead of main. Back to main with plain `update`.
+pub fn run_dev(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
+    run_with(options, paths, runner, install_dev_command())
 }
 
 fn run_with(options: Options, paths: &Paths, runner: &dyn Runner, install: Command) -> i32 {
@@ -234,8 +241,8 @@ mod tests {
     }
 
     #[test]
-    fn install_test_pulls_the_named_branch() {
-        let command = install_test_command("fix/tap-toggle-after-space");
+    fn install_dev_pulls_the_dev_branch() {
+        let command = install_dev_command();
         assert_eq!(command.prog, "cargo");
         assert_eq!(
             command.args,
@@ -244,39 +251,39 @@ mod tests {
                 "--git".to_string(),
                 REPO.to_string(),
                 "--branch".to_string(),
-                "fix/tap-toggle-after-space".to_string(),
+                "dev".to_string(),
                 "--locked".to_string(),
             ]
         );
     }
 
     #[test]
-    fn test_run_reinstalls_from_the_branch_then_restarts() {
-        let (_root, paths) = installed_paths("update-test-run");
-        let cargo = scratch("update-test-run-home");
+    fn dev_run_reinstalls_from_dev_then_restarts() {
+        let (_root, paths) = installed_paths("update-dev-run");
+        let cargo = scratch("update-dev-run-home");
         std::fs::create_dir_all(cargo.join("bin")).unwrap();
         let copy = cargo.join("bin").join("niri-punto");
         std::fs::write(&copy, b"cargo-binary").unwrap();
         let _env = CargoHomeGuard::point_at(&cargo);
         let runner = FakeRunner::new();
         let options = Options::default();
-        assert_eq!(run_test(options, &paths, &runner, "dev"), 0);
+        assert_eq!(run_dev(options, &paths, &runner), 0);
         let unit = std::fs::read_to_string(&paths.unit_path).unwrap();
         assert!(unit.contains(&format!("ExecStart={}", copy.display())));
         let commands = runner.commands.borrow();
         assert_eq!(commands.len(), 3);
-        assert_eq!(commands[0], install_test_command("dev"));
+        assert_eq!(commands[0], install_dev_command());
         assert_eq!(commands[1], reload_command());
         assert_eq!(commands[2], restart_command());
     }
 
     #[test]
-    fn test_run_refuses_packaged_installs() {
-        let (_root, mut paths) = installed_paths("update-test-packaged");
+    fn dev_run_refuses_packaged_installs() {
+        let (_root, mut paths) = installed_paths("update-dev-packaged");
         paths.exe = PathBuf::from("/usr/bin/niri-punto");
-        let _env = CargoHomeGuard::empty("update-test-packaged-home");
+        let _env = CargoHomeGuard::empty("update-dev-packaged-home");
         let runner = FakeRunner::new();
-        assert_eq!(run_test(Options::default(), &paths, &runner, "dev"), 1);
+        assert_eq!(run_dev(Options::default(), &paths, &runner), 1);
         assert!(runner.commands.borrow().is_empty());
     }
 

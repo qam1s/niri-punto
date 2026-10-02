@@ -41,7 +41,7 @@ fn usage() -> ! {
     );
     eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule, cargo copy");
     eprintln!("  update [--dry-run]              refresh the cargo install and restart");
-    eprintln!("  update-test [--branch NAME] [--dry-run]  install a test branch build and restart");
+    eprintln!("  update-dev [--dry-run]          install the dev branch build and restart");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("  version                print the daemon version");
     eprintln!("niri binds (e.g. Mod+L) use the convert-word subcommand.");
@@ -153,7 +153,7 @@ fn main() {
         None | Some("--input-dir") | Some("--config") => ("run", raw.as_slice()),
         Some("--version") | Some("-V") => version(),
         Some("run") | Some("convert-word") | Some("setup") | Some("uninstall") | Some("update")
-        | Some("update-test") | Some("doctor") | Some("version") => (raw[0].as_str(), &raw[1..]),
+        | Some("update-dev") | Some("doctor") | Some("version") => (raw[0].as_str(), &raw[1..]),
         _ => usage(),
     };
     match command {
@@ -216,35 +216,22 @@ fn main() {
             };
             std::process::exit(update::run(options, &paths, &setup::RealRunner));
         }
-        "update-test" => {
+        "update-dev" => {
             let mut options = setup::Options::default();
-            let mut branch = update::TEST_BRANCH.to_string();
-            let mut rest = rest.iter();
-            while let Some(arg) = rest.next() {
+            for arg in rest {
                 match arg.as_str() {
                     "--dry-run" => options.dry_run = true,
-                    "--branch" => {
-                        branch = rest
-                            .next()
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| usage());
-                    }
                     _ => usage(),
                 }
             }
             let paths = match setup::resolve() {
                 Ok(paths) => paths,
                 Err(error) => {
-                    eprintln!("update-test: {error}");
+                    eprintln!("update-dev: {error}");
                     std::process::exit(1);
                 }
             };
-            std::process::exit(update::run_test(
-                options,
-                &paths,
-                &setup::RealRunner,
-                &branch,
-            ));
+            std::process::exit(update::run_dev(options, &paths, &setup::RealRunner));
         }
         "version" => {
             if !rest.is_empty() {

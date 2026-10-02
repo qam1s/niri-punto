@@ -27,7 +27,7 @@ cargo install --git https://github.com/qam1s/niri-punto --locked && ~/.cargo/bin
 Test a branch before it reaches main, then go back:
 
 ```sh
-niri-punto update-test --branch <name>  # default branch: dev
+niri-punto update-dev  # trial build from the dev branch
 niri-punto update  # back to main
 ```
 
