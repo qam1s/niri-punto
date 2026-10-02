@@ -622,7 +622,7 @@ fn handle_key_at(
                 }
                 return;
             }
-            if staged.tap && buffer.phrase().is_empty() {
+            if staged.tap && buffer.trailing_word(reader::is_word_boundary).is_empty() {
                 match ipc.current_layout() {
                     Ok((current, _)) => {
                         let target = if current == 0 { 1 } else { 0 };
@@ -1336,13 +1336,37 @@ mod tests {
     }
 
     #[test]
-    fn tap_with_only_a_trailing_space_does_not_toggle() {
+    fn tap_with_trailing_space_toggles_without_erasing() {
         let mut h = Harness::new();
         h.tap(T, KeyCode::KEY_SPACE.code());
         h.at(T + 500, SUPER, 1);
         h.at(T + 600, SUPER, 0);
-        assert!(h.ipc.switches.is_empty());
+        assert_eq!(h.ipc.switches, vec![1]);
         assert!(h.injector.erases.is_empty());
+    }
+
+    #[test]
+    fn tap_after_word_space_toggles_without_erasing() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.tap(T + 500, KeyCode::KEY_SPACE.code());
+        h.at(T + 800, SUPER, 1);
+        h.at(T + 900, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert!(h.injector.erases.is_empty());
+    }
+
+    #[test]
+    fn phrase_after_word_space_still_converts() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.tap(T + 500, KeyCode::KEY_SPACE.code());
+        h.at(T + 800, SUPER, 1);
+        h.at(T + 850, SHIFT, 1);
+        h.at(T + 900, SHIFT, 0);
+        h.at(T + 950, SUPER, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.injector.erases, vec![7]);
     }
 
     #[test]
