@@ -99,6 +99,12 @@ impl std::fmt::Display for Command {
 /// Executes (or observes) the privileged and daemon-reload steps.
 pub trait Runner {
     fn run(&self, command: &Command) -> io::Result<()>;
+
+    /// Run a command and capture its stdout. Fakes may not support it.
+    fn capture(&self, command: &Command) -> io::Result<String> {
+        let _ = command;
+        Err(io::Error::other("command output capture is not supported"))
+    }
 }
 
 /// Really spawns the command.
@@ -114,6 +120,17 @@ impl Runner for RealRunner {
         } else {
             Err(io::Error::other(format!("command failed: {command}")))
         }
+    }
+
+    fn capture(&self, command: &Command) -> io::Result<String> {
+        let output = std::process::Command::new(&command.prog)
+            .args(&command.args)
+            .output()?;
+        if !output.status.success() {
+            return Err(io::Error::other(format!("command failed: {command}")));
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|_| io::Error::other(format!("command stdout is not UTF-8: {command}")))
     }
 }
 

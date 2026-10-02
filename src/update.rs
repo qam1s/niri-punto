@@ -30,6 +30,11 @@ pub fn install_dev_command() -> Command {
     cmd("cargo", &["install", "--git", REPO, "--locked"])
 }
 
+/// Ask git for the current revision of the remote main branch.
+pub fn ls_remote_main_command() -> Command {
+    cmd("git", &["ls-remote", REPO, "refs/heads/main"])
+}
+
 /// Pick up the rewritten unit file.
 pub fn reload_command() -> Command {
     cmd("systemctl", &["--user", "daemon-reload"])
@@ -63,9 +68,48 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
 }
 
 /// Run the dev update: same steps, but the binary comes from main's
-/// freshest commit instead of the released crates.io version.
+/// freshest commit instead of the released crates.io version. Cargo
+/// rebuilds git installs unconditionally, so skip it when the installed
+/// dev build already sits on the current main revision.
 pub fn run_dev(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
+    if !options.dry_run && !setup::is_packaged(&paths.exe) {
+        if let Some(remote) = remote_main_rev(runner) {
+            if installed_dev_rev().as_deref() == Some(remote.as_str()) {
+                println!("niri-punto is already the latest dev build ({remote})");
+                return 0;
+            }
+        }
+    }
     run_with(options, paths, runner, install_dev_command())
+}
+
+/// Cargo home, where install metadata lives.
+fn cargo_home() -> Option<PathBuf> {
+    if let Some(dir) = std::env::var_os("CARGO_HOME") {
+        return Some(PathBuf::from(dir));
+    }
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo"))
+}
+
+/// Revision of the previously installed git main build, read from cargo's
+/// install metadata. `None` when main was never installed from git or the
+/// metadata is unreadable; the update then just reinstalls.
+pub fn installed_dev_rev() -> Option<String> {
+    let text = std::fs::read_to_string(cargo_home()?.join(".crates2.json")).ok()?;
+    let needle = format!("git+{REPO}#");
+    let rest = &text[text.find(&needle)? + needle.len()..];
+    let rev = rest.get(..40)?;
+    rev.chars()
+        .all(|c| c.is_ascii_hexdigit())
+        .then(|| rev.to_string())
+}
+
+/// Current revision of the remote main branch; `None` when git is
+/// unavailable or its output is unexpected.
+pub fn remote_main_rev(runner: &dyn Runner) -> Option<String> {
+    let output = runner.capture(&ls_remote_main_command()).ok()?;
+    let rev = output.split_whitespace().next()?;
+    (rev.len() == 40 && rev.chars().all(|c| c.is_ascii_hexdigit())).then(|| rev.to_string())
 }
 
 fn run_with(options: Options, paths: &Paths, runner: &dyn Runner, install: Command) -> i32 {
@@ -134,12 +178,21 @@ mod tests {
 
     struct FakeRunner {
         commands: RefCell<Vec<Command>>,
+        remote: Option<String>,
     }
 
     impl FakeRunner {
         fn new() -> Self {
             Self {
                 commands: RefCell::new(Vec::new()),
+                remote: None,
+            }
+        }
+
+        fn with_remote(rev: &str) -> Self {
+            Self {
+                commands: RefCell::new(Vec::new()),
+                remote: Some(rev.to_string()),
             }
         }
     }
@@ -148,6 +201,13 @@ mod tests {
         fn run(&self, command: &Command) -> io::Result<()> {
             self.commands.borrow_mut().push(command.clone());
             Ok(())
+        }
+
+        fn capture(&self, _command: &Command) -> io::Result<String> {
+            self.remote
+                .clone()
+                .map(|rev| format!("{rev}\trefs/heads/main\n"))
+                .ok_or_else(|| io::Error::other("no remote"))
         }
     }
 
@@ -270,6 +330,70 @@ mod tests {
         let runner = FakeRunner::new();
         assert_eq!(run_dev(Options::default(), &paths, &runner), 1);
         assert!(runner.commands.borrow().is_empty());
+    }
+
+    const REV: &str = "79eaeb4a0a7a6fdc0ca1934bb793468312ef3374";
+    const OTHER_REV: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn crates_json(cargo: &std::path::Path, key: &str) {
+        let text = format!(r#"{{"installs":{{"{key}":{{}}}}}}"#);
+        std::fs::write(cargo.join(".crates2.json"), text).unwrap();
+    }
+
+    #[test]
+    fn installed_dev_rev_reads_the_git_entry() {
+        let cargo = scratch("update-rev-home");
+        crates_json(&cargo, &format!("niri-punto 0.3.8 (git+{REPO}#{REV})"));
+        let _env = CargoHomeGuard::point_at(&cargo);
+        assert_eq!(installed_dev_rev().as_deref(), Some(REV));
+    }
+
+    #[test]
+    fn installed_dev_rev_is_none_for_registry_installs() {
+        let cargo = scratch("update-rev-registry-home");
+        crates_json(
+            &cargo,
+            "niri-punto 0.3.8 (registry+https://github.com/rust-lang/crates.io-index)",
+        );
+        let _env = CargoHomeGuard::point_at(&cargo);
+        assert_eq!(installed_dev_rev(), None);
+    }
+
+    #[test]
+    fn installed_dev_rev_is_none_without_metadata() {
+        let _env = CargoHomeGuard::empty("update-rev-missing-home");
+        assert_eq!(installed_dev_rev(), None);
+    }
+
+    #[test]
+    fn remote_main_rev_parses_ls_remote_output() {
+        let runner = FakeRunner::with_remote(REV);
+        assert_eq!(remote_main_rev(&runner).as_deref(), Some(REV));
+        let runner = FakeRunner::new();
+        assert_eq!(remote_main_rev(&runner), None);
+    }
+
+    #[test]
+    fn dev_run_skips_install_when_main_is_unchanged() {
+        let (_root, paths) = installed_paths("update-dev-skip");
+        let cargo = scratch("update-dev-skip-home");
+        crates_json(&cargo, &format!("niri-punto 0.3.8 (git+{REPO}#{REV})"));
+        let _env = CargoHomeGuard::point_at(&cargo);
+        let runner = FakeRunner::with_remote(REV);
+        assert_eq!(run_dev(Options::default(), &paths, &runner), 0);
+        assert!(runner.commands.borrow().is_empty());
+    }
+
+    #[test]
+    fn dev_run_installs_when_main_moved() {
+        let (_root, paths) = installed_paths("update-dev-moved");
+        let cargo = scratch("update-dev-moved-home");
+        crates_json(&cargo, &format!("niri-punto 0.3.8 (git+{REPO}#{REV})"));
+        let _env = CargoHomeGuard::point_at(&cargo);
+        let runner = FakeRunner::with_remote(OTHER_REV);
+        assert_eq!(run_dev(Options::default(), &paths, &runner), 0);
+        let commands = runner.commands.borrow();
+        assert_eq!(commands[0], install_dev_command());
     }
 
     #[test]
