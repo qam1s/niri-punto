@@ -23,8 +23,6 @@ keyboard keeps working.
 cargo install niri-punto --locked && ~/.cargo/bin/niri-punto setup
 ```
 
-Updates: `niri-punto update` installs the released crates.io build.
-
 ## Usage
 
 | Gesture        | Action | Description                                                  |
