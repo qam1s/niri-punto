@@ -40,8 +40,8 @@ fn usage() -> ! {
         "  setup [--no-udev] [--dry-run]  register this binary, install unit, config, udev rule"
     );
     eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule, cargo copy");
-    eprintln!("  update [--dry-run]              refresh the cargo install and restart");
-    eprintln!("  update-dev [--dry-run]          install the dev branch build and restart");
+    eprintln!("  update [--dry-run]              install the released crates.io build and restart");
+    eprintln!("  update-dev [--dry-run]          install the freshest main build and restart");
     eprintln!("  doctor                 check devices, permissions, socket, layouts");
     eprintln!("  version                print the daemon version");
     eprintln!("niri binds (e.g. Mod+L) use the convert-word subcommand.");
