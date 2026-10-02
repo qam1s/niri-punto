@@ -1,7 +1,9 @@
 //! `update`: refresh the cargo install, re-point the unit, restart.
 //!
-//! Packaged installs (`/usr/bin`) belong to the package manager and are
-//! refused; udev and config are `setup` territory and stay untouched.
+//! `update` installs the released crates.io build; `update-dev` installs
+//! the freshest main build. Packaged installs (`/usr/bin`) belong to the
+//! package manager and are refused; udev and config are `setup` territory
+//! and stay untouched.
 
 use crate::setup::{self, Command, Options, Paths, Runner};
 use crate::uninstall;
@@ -18,28 +20,14 @@ fn cmd(prog: &str, args: &[&str]) -> Command {
 /// Git source of the release the install docs point at.
 pub const REPO: &str = "https://github.com/qam1s/niri-punto";
 
-/// Branch `update-dev` installs: the standing branch for builds that
-/// are not ready for main yet.
-pub const TEST_BRANCH: &str = "dev";
-
-/// Rebuild the binary from the latest main.
+/// Rebuild the binary from the released crates.io version.
 pub fn install_command() -> Command {
-    cmd("cargo", &["install", "--git", REPO, "--locked"])
+    cmd("cargo", &["install", "niri-punto", "--locked"])
 }
 
-/// Rebuild the binary from the dev branch.
+/// Rebuild the binary from the freshest main.
 pub fn install_dev_command() -> Command {
-    cmd(
-        "cargo",
-        &[
-            "install",
-            "--git",
-            REPO,
-            "--branch",
-            TEST_BRANCH,
-            "--locked",
-        ],
-    )
+    cmd("cargo", &["install", "--git", REPO, "--locked"])
 }
 
 /// Pick up the rewritten unit file.
@@ -74,8 +62,8 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
     run_with(options, paths, runner, install_command())
 }
 
-/// Run the dev update: same steps, but the binary comes from the dev
-/// branch instead of main. Back to main with plain `update`.
+/// Run the dev update: same steps, but the binary comes from main's
+/// freshest commit instead of the released crates.io version.
 pub fn run_dev(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
     run_with(options, paths, runner, install_dev_command())
 }
@@ -226,22 +214,21 @@ mod tests {
     }
 
     #[test]
-    fn install_pulls_locked_main_from_the_repo() {
+    fn install_pulls_the_released_crate() {
         let command = install_command();
         assert_eq!(command.prog, "cargo");
         assert_eq!(
             command.args,
             vec![
                 "install".to_string(),
-                "--git".to_string(),
-                REPO.to_string(),
+                "niri-punto".to_string(),
                 "--locked".to_string(),
             ]
         );
     }
 
     #[test]
-    fn install_dev_pulls_the_dev_branch() {
+    fn install_dev_pulls_locked_main_from_the_repo() {
         let command = install_dev_command();
         assert_eq!(command.prog, "cargo");
         assert_eq!(
@@ -250,15 +237,13 @@ mod tests {
                 "install".to_string(),
                 "--git".to_string(),
                 REPO.to_string(),
-                "--branch".to_string(),
-                "dev".to_string(),
                 "--locked".to_string(),
             ]
         );
     }
 
     #[test]
-    fn dev_run_reinstalls_from_dev_then_restarts() {
+    fn dev_run_reinstalls_from_main_then_restarts() {
         let (_root, paths) = installed_paths("update-dev-run");
         let cargo = scratch("update-dev-run-home");
         std::fs::create_dir_all(cargo.join("bin")).unwrap();

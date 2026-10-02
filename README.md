@@ -20,8 +20,10 @@ keyboard keeps working.
 ## Install
 
 ```sh
-cargo install --git https://github.com/qam1s/niri-punto --locked && ~/.cargo/bin/niri-punto setup
+cargo install niri-punto --locked && ~/.cargo/bin/niri-punto setup
 ```
+
+Updates: `niri-punto update` installs the released crates.io build.
 
 ## Usage
 
