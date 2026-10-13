@@ -174,6 +174,7 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_env::{CargoHomeGuard, scratch};
     use std::cell::RefCell;
     use std::path::PathBuf;
 
@@ -193,48 +194,6 @@ mod tests {
         fn run(&self, command: &Command) -> io::Result<()> {
             self.commands.borrow_mut().push(command.clone());
             Ok(())
-        }
-    }
-
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("niri-punto-test-{name}"));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    /// Point `CARGO_HOME` at a scratch dir for one test; restores on drop.
-    /// Tests run in parallel threads, so the lock serializes env access.
-    struct CargoHomeGuard {
-        prior: Option<std::ffi::OsString>,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-
-    impl CargoHomeGuard {
-        fn point_at(dir: &Path) -> Self {
-            let lock = ENV_LOCK.lock().unwrap();
-            let prior = std::env::var_os("CARGO_HOME");
-            unsafe {
-                std::env::set_var("CARGO_HOME", dir);
-            }
-            Self { prior, _lock: lock }
-        }
-
-        fn empty(tag: &str) -> Self {
-            Self::point_at(&scratch(tag))
-        }
-    }
-
-    impl Drop for CargoHomeGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prior {
-                    Some(value) => std::env::set_var("CARGO_HOME", value),
-                    None => std::env::remove_var("CARGO_HOME"),
-                }
-            }
         }
     }
 

@@ -11,6 +11,8 @@ mod ipc;
 mod reader;
 mod scorer;
 mod setup;
+#[cfg(test)]
+mod test_env;
 mod trigger;
 mod undo;
 mod uninstall;

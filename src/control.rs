@@ -153,6 +153,7 @@ mod tests {
 
     #[test]
     fn socket_path_override_wins_for_tests() {
+        let _env = crate::test_env::lock();
         let prior = env::var_os("NIRI_PUNTO_SOCKET");
         unsafe {
             env::set_var("NIRI_PUNTO_SOCKET", "/tmp/niri-punto-test-override.sock");
