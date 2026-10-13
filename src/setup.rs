@@ -22,10 +22,11 @@ pub const SERVICE_FILE_NAME: &str = "niri-punto.service";
 pub const PACKAGED_BIN_DIR: &str = "/usr/bin";
 
 /// Whether `exe` runs from a packaged install (e.g. `/usr/bin/niri-punto`
-/// from the AUR package) rather than a user-local copy.
+/// from the AUR package, or `/nix/store/.../bin/niri-punto` on NixOS)
+/// rather than a user-local copy.
 pub fn is_packaged(exe: &Path) -> bool {
     exe.parent()
-        .is_some_and(|dir| dir == Path::new(PACKAGED_BIN_DIR))
+        .is_some_and(|dir| dir == Path::new(PACKAGED_BIN_DIR) || dir.starts_with("/nix/store"))
 }
 
 /// CLI flags for `setup`.
@@ -439,6 +440,9 @@ mod tests {
     #[test]
     fn packaged_exe_is_detected_by_its_dir() {
         assert!(is_packaged(Path::new("/usr/bin/niri-punto")));
+        assert!(is_packaged(Path::new(
+            "/nix/store/abc123-niri-punto-0.3.10/bin/niri-punto"
+        )));
         assert!(!is_packaged(Path::new("/home/u/.local/bin/niri-punto")));
         assert!(!is_packaged(Path::new("/usr/local/bin/niri-punto")));
         assert!(!is_packaged(Path::new("niri-punto")));
