@@ -198,6 +198,7 @@ pub struct Reader {
     last_rescan: Instant,
 }
 
+#[derive(Debug, PartialEq)]
 pub enum Poll {
     Key(RawKey),
     Idle,
@@ -403,5 +404,275 @@ mod tests {
     fn unreadable_input_dir_yields_no_candidates() {
         let nodes = candidate_nodes(Path::new("/nonexistent-dir-for-tests"));
         assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn candidate_nodes_lists_sorted_event_entries() {
+        let dir = std::env::temp_dir().join("niri-punto-test-reader-candidates");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["event10", "mouse0", "event2", "event1"] {
+            std::fs::write(dir.join(name), b"fake").unwrap();
+        }
+        let nodes = candidate_nodes(&dir);
+        let names: Vec<String> = nodes
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, vec!["event1", "event10", "event2"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn buffer_entry_records_shift_state() {
+        assert_eq!(
+            buffer_entry_for(30, true),
+            BufferEntry {
+                scancode: 30,
+                shift: true
+            }
+        );
+        assert_eq!(
+            buffer_entry_for(30, false),
+            BufferEntry {
+                scancode: 30,
+                shift: false
+            }
+        );
+    }
+
+    #[test]
+    fn ctrl_names_map_to_both_sides() {
+        assert_eq!(
+            modifier_scancodes("ctrl"),
+            Some((KeyCode::KEY_LEFTCTRL.code(), KeyCode::KEY_RIGHTCTRL.code()))
+        );
+    }
+
+    #[test]
+    fn extended_function_keys_are_detected() {
+        for code in [
+            KeyCode::KEY_F2.code(),
+            KeyCode::KEY_F3.code(),
+            KeyCode::KEY_F4.code(),
+            KeyCode::KEY_F6.code(),
+            KeyCode::KEY_F7.code(),
+            KeyCode::KEY_F8.code(),
+            KeyCode::KEY_F9.code(),
+            KeyCode::KEY_F13.code(),
+            KeyCode::KEY_F14.code(),
+            KeyCode::KEY_F15.code(),
+            KeyCode::KEY_F16.code(),
+            KeyCode::KEY_F17.code(),
+            KeyCode::KEY_F18.code(),
+            KeyCode::KEY_F19.code(),
+            KeyCode::KEY_F20.code(),
+            KeyCode::KEY_F21.code(),
+            KeyCode::KEY_F22.code(),
+            KeyCode::KEY_F23.code(),
+            KeyCode::KEY_F24.code(),
+        ] {
+            assert!(is_function(code), "code {code}");
+        }
+    }
+
+    #[test]
+    fn missing_device_is_not_a_keyboard() {
+        assert!(open_keyboard(Path::new("/nonexistent-dir-for-tests/event0")).is_none());
+        let dir = std::env::temp_dir().join("niri-punto-test-reader-plain");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("event0");
+        std::fs::write(&plain, b"not-an-evdev-device").unwrap();
+        assert!(open_keyboard(&plain).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn reader_opens_empty_dir_with_no_live_devices() {
+        let dir = std::env::temp_dir().join("niri-punto-test-reader-open");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let reader = Reader::open(&dir);
+        assert!(reader.live_devices().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn poll_on_empty_channel_idles_then_reports_gone() {
+        use std::sync::mpsc;
+        let dir = std::env::temp_dir().join("niri-punto-test-reader-poll");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut reader = Reader::open(&dir);
+        assert!(reader.live_devices().is_empty());
+        assert!(matches!(
+            reader.poll(&dir, Duration::from_millis(5)),
+            Poll::Idle
+        ));
+        drop(reader);
+        let (tx, rx) = mpsc::channel::<DeviceMsg>();
+        drop(tx);
+        let mut reader = Reader {
+            tx: mpsc::channel::<DeviceMsg>().0,
+            rx,
+            live: HashSet::new(),
+            last_rescan: Instant::now(),
+        };
+        assert!(matches!(
+            reader.poll(&dir, Duration::from_millis(5)),
+            Poll::Gone
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn poll_gone_is_distinct_from_idle() {
+        assert_eq!(Poll::Idle, Poll::Idle);
+        assert_ne!(Poll::Gone, Poll::Idle);
+        assert_eq!(
+            Poll::Key(RawKey {
+                scancode: 30,
+                value: 1
+            }),
+            Poll::Key(RawKey {
+                scancode: 30,
+                value: 1
+            })
+        );
+        assert_ne!(
+            Poll::Key(RawKey {
+                scancode: 30,
+                value: 1
+            }),
+            Poll::Key(RawKey {
+                scancode: 31,
+                value: 1
+            })
+        );
+        assert!(!format!("{:?}", Poll::Gone).is_empty());
+        assert!(!format!("{:?}", Poll::Idle).is_empty());
+        assert!(
+            !format!(
+                "{:?}",
+                Poll::Key(RawKey {
+                    scancode: 1,
+                    value: 0
+                })
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn poll_delivers_queued_keys_and_disconnects() {
+        use std::sync::mpsc;
+        let (tx, rx) = mpsc::channel::<DeviceMsg>();
+        let mut reader = Reader {
+            tx: tx.clone(),
+            rx,
+            live: HashSet::new(),
+            last_rescan: Instant::now(),
+        };
+        tx.send(DeviceMsg::Key(RawKey {
+            scancode: 30,
+            value: 1,
+        }))
+        .unwrap();
+        let dir = std::env::temp_dir().join("niri-punto-test-reader-queue");
+        assert_eq!(
+            reader.poll(&dir, Duration::from_secs(1)),
+            Poll::Key(RawKey {
+                scancode: 30,
+                value: 1
+            })
+        );
+        let path = PathBuf::from("/dev/input/event9");
+        reader.live.insert(path.clone());
+        tx.send(DeviceMsg::Disconnected(path)).unwrap();
+        assert!(matches!(
+            reader.poll(&dir, Duration::from_secs(1)),
+            Poll::Idle
+        ));
+        assert!(reader.live_devices().is_empty());
+    }
+
+    #[test]
+    fn rescan_ignores_missing_and_plain_files() {
+        let dir = std::env::temp_dir().join("niri-punto-test-reader-rescan");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("event0"), b"not-an-evdev-device").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<DeviceMsg>();
+        let mut reader = Reader {
+            tx: tx.clone(),
+            rx,
+            live: HashSet::new(),
+            last_rescan: Instant::now(),
+        };
+        reader.rescan(&dir, &tx);
+        assert!(reader.live_devices().is_empty());
+        reader.rescan(Path::new("/nonexistent-dir-for-tests"), &tx);
+        assert!(reader.live_devices().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn timeout_rescans_after_the_interval() {
+        let dir = std::env::temp_dir().join("niri-punto-test-reader-rescan-iv");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<DeviceMsg>();
+        let mut reader = Reader {
+            tx,
+            rx,
+            live: HashSet::new(),
+            last_rescan: Instant::now() - RESCAN_INTERVAL - Duration::from_secs(1),
+        };
+        assert!(matches!(
+            reader.poll(&dir, Duration::from_millis(5)),
+            Poll::Idle
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn disconnect_with_live_devices_idles() {
+        use std::sync::mpsc;
+        let dir = std::env::temp_dir().join("niri-punto-test-reader-live-gone");
+        let (tx, rx) = mpsc::channel::<DeviceMsg>();
+        drop(tx);
+        let mut live = HashSet::new();
+        live.insert(dir.join("event0"));
+        let mut reader = Reader {
+            tx: mpsc::channel::<DeviceMsg>().0,
+            rx,
+            live,
+            last_rescan: Instant::now(),
+        };
+        assert!(matches!(
+            reader.poll(&dir, Duration::from_millis(5)),
+            Poll::Idle
+        ));
+    }
+
+    #[test]
+    fn rescan_skips_already_live_paths() {
+        let dir = std::env::temp_dir().join("niri-punto-test-reader-live-skip");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("event0"), b"not-an-evdev-device").unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<DeviceMsg>();
+        let mut live = HashSet::new();
+        live.insert(dir.join("event0"));
+        let mut reader = Reader {
+            tx: tx.clone(),
+            rx,
+            live,
+            last_rescan: Instant::now(),
+        };
+        reader.rescan(&dir, &tx);
+        assert_eq!(reader.live_devices().len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
