@@ -38,7 +38,6 @@ Or in your Nix flake:
 | Gesture        | Action | Description                                                  |
 | -------------- | ------ | ------------------------------------------------------------ |
 | Mod            | word   | Convert word or switch layout when empty (incl. after space) |
-| Mod + Shift    | phrase | Convert phrase                                               |
 | Double Shift   | phrase | Convert phrase                                               |
 | Repeat gesture | undo   | Undo previous conversion                                     |
 

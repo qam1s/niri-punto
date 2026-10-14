@@ -26,9 +26,7 @@ use scorer::{Verdict, latin_index};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use trigger::{
-    Bind, Gesture, GestureKind, Key, ModSet, PendingGesture, TimingConfig, TriggerMachine,
-};
+use trigger::{Gesture, GestureKind, Key, PendingGesture, TimingConfig, TriggerMachine};
 
 const CONTROL_POLL: Duration = Duration::from_millis(100);
 
@@ -339,24 +337,7 @@ fn run(input_dir: PathBuf) {
     let mut triggers = TriggerMachine::new();
     triggers.set_tap_action(Some(GestureKind::Word));
     triggers.set_timing(TimingConfig::default());
-    let (shift_left, shift_right) =
-        reader::modifier_scancodes("shift").expect("shift has left and right sides");
-    let mods = ModSet {
-        meta: true,
-        ..ModSet::default()
-    };
-    triggers.set_binds(vec![
-        Bind {
-            mods,
-            scancode: shift_left,
-            kind: GestureKind::Phrase,
-        },
-        Bind {
-            mods,
-            scancode: shift_right,
-            kind: GestureKind::Phrase,
-        },
-    ]);
+    triggers.set_binds(Vec::new());
     triggers.set_pair_base(GestureKind::Phrase);
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new();
@@ -1275,7 +1256,7 @@ mod tests {
     }
 
     #[test]
-    fn mod_shift_chord_converts_phrase_on_mod_release() {
+    fn mod_shift_chord_does_nothing() {
         let mut h = Harness::new();
         h.type_word(T);
         h.at(T + 500, SUPER, 1);
@@ -1284,8 +1265,8 @@ mod tests {
         h.at(T + 600, SHIFT, 0);
         assert!(h.ipc.switches.is_empty());
         h.at(T + 650, SUPER, 0);
-        assert_eq!(h.ipc.switches, vec![1]);
-        assert_eq!(h.injector.erases, vec![6]);
+        assert!(h.ipc.switches.is_empty());
+        assert!(h.injector.erases.is_empty());
     }
 
     #[test]
@@ -1357,10 +1338,11 @@ mod tests {
         let mut h = Harness::new();
         h.type_word(T);
         h.tap(T + 500, KeyCode::KEY_SPACE.code());
-        h.at(T + 800, SUPER, 1);
-        h.at(T + 850, SHIFT, 1);
-        h.at(T + 900, SHIFT, 0);
-        h.at(T + 950, SUPER, 0);
+        h.at(T + 800, SHIFT, 1);
+        h.at(T + 850, SHIFT_RIGHT, 1);
+        h.at(T + 900, SHIFT_RIGHT, 0);
+        assert!(h.ipc.switches.is_empty());
+        h.at(T + 950, SHIFT, 0);
         assert_eq!(h.ipc.switches, vec![1]);
         assert_eq!(h.injector.erases, vec![7]);
     }

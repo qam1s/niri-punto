@@ -109,6 +109,7 @@ pub fn is_copy_key(scancode: u16) -> bool {
     scancode == KeyCode::KEY_C.code() || scancode == KeyCode::KEY_INSERT.code()
 }
 
+#[allow(dead_code)]
 pub fn modifier_scancodes(name: &str) -> Option<(u16, u16)> {
     let (left, right) = match name {
         "mod" => (KeyCode::KEY_LEFTMETA, KeyCode::KEY_RIGHTMETA),

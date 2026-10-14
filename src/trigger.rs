@@ -257,10 +257,7 @@ impl TriggerMachine {
             if self.meta_held() {
                 self.first_press_ms = None;
                 self.disturbed = false;
-                let kind = GestureKind::Phrase;
-                let undo = matches!(self.last_gesture, Some((k, t)) if k == kind && now_ms.saturating_sub(t) <= self.timing.undo_ms);
-                self.last_gesture = Some((kind, now_ms));
-                return Some(Gesture { kind, undo });
+                return None;
             }
             match self.first_press_ms {
                 Some(first)
@@ -675,16 +672,10 @@ mod tests {
     }
 
     #[test]
-    fn shift_press_with_mod_held_is_phrase_not_a_tap() {
+    fn shift_press_with_mod_held_is_nothing_and_voids_tap() {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::MetaLeft, T), None);
-        assert_eq!(
-            press(&mut m, Key::ShiftLeft, T + 50),
-            Some(Gesture {
-                kind: GestureKind::Phrase,
-                undo: false
-            })
-        );
+        assert_eq!(press(&mut m, Key::ShiftLeft, T + 50), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 80), None);
         assert_eq!(release(&mut m, Key::MetaLeft, T + 100), None);
     }
@@ -777,57 +768,31 @@ mod tests {
     }
 
     #[test]
-    fn mod_shift_press_is_phrase() {
+    fn mod_shift_press_is_nothing() {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::MetaLeft, T), None);
-        assert_eq!(
-            press(&mut m, Key::ShiftLeft, T + 50),
-            Some(Gesture {
-                kind: GestureKind::Phrase,
-                undo: false
-            })
-        );
+        assert_eq!(press(&mut m, Key::ShiftLeft, T + 50), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 100), None);
         assert_eq!(release(&mut m, Key::MetaLeft, T + 150), None);
     }
 
     #[test]
-    fn mod_shift_repeat_is_undo() {
+    fn mod_shift_repeat_is_nothing() {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::MetaLeft, T), None);
-        let first = press(&mut m, Key::ShiftLeft, T + 50);
-        assert!(matches!(
-            first,
-            Some(Gesture {
-                kind: GestureKind::Phrase,
-                undo: false
-            })
-        ));
+        assert_eq!(press(&mut m, Key::ShiftLeft, T + 50), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 100), None);
         assert_eq!(release(&mut m, Key::MetaLeft, T + 150), None);
         assert_eq!(press(&mut m, Key::MetaLeft, T + 200), None);
-        let second = press(&mut m, Key::ShiftLeft, T + 250);
-        assert!(matches!(
-            second,
-            Some(Gesture {
-                kind: GestureKind::Phrase,
-                undo: true
-            })
-        ));
+        assert_eq!(press(&mut m, Key::ShiftLeft, T + 250), None);
     }
 
     #[test]
-    fn ctrl_mod_shift_is_phrase() {
+    fn ctrl_mod_shift_is_nothing() {
         let mut m = TriggerMachine::new();
         assert_eq!(press(&mut m, Key::CtrlLeft, T), None);
         assert_eq!(press(&mut m, Key::MetaLeft, T + 10), None);
-        assert_eq!(
-            press(&mut m, Key::ShiftLeft, T + 50),
-            Some(Gesture {
-                kind: GestureKind::Phrase,
-                undo: false
-            })
-        );
+        assert_eq!(press(&mut m, Key::ShiftLeft, T + 50), None);
     }
 
     #[test]
@@ -845,13 +810,7 @@ mod tests {
         assert_eq!(press(&mut m, Key::ShiftLeft, T), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 50), None);
         assert_eq!(press(&mut m, Key::MetaLeft, T + 100), None);
-        assert!(matches!(
-            press(&mut m, Key::ShiftLeft, T + 150),
-            Some(Gesture {
-                kind: GestureKind::Phrase,
-                ..
-            })
-        ));
+        assert_eq!(press(&mut m, Key::ShiftLeft, T + 150), None);
         assert_eq!(release(&mut m, Key::ShiftLeft, T + 200), None);
         assert_eq!(release(&mut m, Key::MetaLeft, T + 250), None);
         assert_eq!(press(&mut m, Key::ShiftLeft, T + 500), None);
@@ -916,19 +875,13 @@ mod tests {
         }]);
         mod_meta(&mut m, T);
         assert_eq!(m.bind(38, T + 10), None);
-        assert_eq!(
-            press(&mut m, Key::ShiftLeft, T + 20),
-            Some(Gesture {
-                kind: GestureKind::Phrase,
-                undo: false
-            })
-        );
+        assert_eq!(press(&mut m, Key::ShiftLeft, T + 20), None);
         let g = m.bind(38, T + 30);
         assert_eq!(
             g,
             Some(Gesture {
                 kind: GestureKind::Phrase,
-                undo: true
+                undo: false
             })
         );
     }
