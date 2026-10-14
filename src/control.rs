@@ -154,12 +154,67 @@ mod tests {
             socket_path(),
             PathBuf::from("/tmp/niri-punto-test-override.sock")
         );
+        crate::test_env::restore("NIRI_PUNTO_SOCKET", prior);
+    }
+
+    #[test]
+    fn socket_path_falls_back_to_runtime_and_tmp_dirs() {
+        let _env = crate::test_env::lock();
+        let prior_socket = env::var_os("NIRI_PUNTO_SOCKET");
+        let prior_runtime = env::var_os("XDG_RUNTIME_DIR");
         unsafe {
-            match prior {
-                Some(value) => env::set_var("NIRI_PUNTO_SOCKET", value),
-                None => env::remove_var("NIRI_PUNTO_SOCKET"),
-            }
+            env::remove_var("NIRI_PUNTO_SOCKET");
+            env::set_var("XDG_RUNTIME_DIR", "/run/user/1000");
         }
+        assert_eq!(
+            socket_path(),
+            PathBuf::from("/run/user/1000/niri-punto.sock")
+        );
+        unsafe {
+            env::remove_var("XDG_RUNTIME_DIR");
+        }
+        assert_eq!(socket_path(), env::temp_dir().join("niri-punto.sock"));
+        crate::test_env::restore("NIRI_PUNTO_SOCKET", prior_socket);
+        crate::test_env::restore("XDG_RUNTIME_DIR", prior_runtime);
+    }
+
+    #[test]
+    fn eof_yields_no_request() {
+        let (client, server) = PairStream::pair().unwrap();
+        drop(client);
+        assert!(!serve_one(server, &channel::<ControlRequest>().0));
+    }
+
+    #[test]
+    fn dropped_queue_reports_shutdown_to_client() {
+        let (client, server) = PairStream::pair().unwrap();
+        let (tx, _rx) = channel::<ControlRequest>();
+        drop(_rx);
+        let thread = std::thread::spawn(move || serve_one(server, &tx));
+        let mut client = client;
+        client.write_all(b"convert-word\n").unwrap();
+        assert_eq!(recv_line(&client), "err daemon is shutting down");
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn dropped_answer_reports_shutdown_to_client() {
+        let (client, server) = PairStream::pair().unwrap();
+        let (tx, rx) = channel::<ControlRequest>();
+        let thread = std::thread::spawn(move || serve_one(server, &tx));
+        let mut client = client;
+        client.write_all(b"convert-word\n").unwrap();
+        let request = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(request.reply);
+        assert_eq!(recv_line(&client), "err daemon is shutting down");
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn already_running_names_the_socket() {
+        let error = already_running(Path::new("/tmp/niri-punto-test.sock"));
+        assert!(error.to_string().contains("/tmp/niri-punto-test.sock"));
+        assert!(error.to_string().contains("already running"));
     }
 
     fn test_socket(name: &str) -> PathBuf {
