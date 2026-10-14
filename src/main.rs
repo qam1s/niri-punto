@@ -602,15 +602,23 @@ mod tests {
     struct FakeEmitter {
         erases: Vec<usize>,
         replays: Vec<Vec<BufferEntry>>,
+        fail_erase: bool,
+        fail_replay: bool,
     }
 
     impl Emitter for FakeEmitter {
         fn erase(&mut self, count: usize) -> io::Result<()> {
+            if self.fail_erase {
+                return Err(io::Error::other("erase broke"));
+            }
             self.erases.push(count);
             Ok(())
         }
 
         fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()> {
+            if self.fail_replay {
+                return Err(io::Error::other("replay broke"));
+            }
             self.replays.push(entries.to_vec());
             Ok(())
         }
@@ -625,16 +633,27 @@ mod tests {
         stream_dead: bool,
         focus: Option<u64>,
         focus_err: bool,
+        fail_current: bool,
+        fail_switch: bool,
+        sticky_switch: bool,
     }
 
     impl LayoutBackend for FakeLayouts {
         fn current_layout(&mut self) -> io::Result<(u8, usize, Vec<String>)> {
+            if self.fail_current {
+                return Err(io::Error::other("layout read dead"));
+            }
             Ok((self.current, self.count, self.names.clone()))
         }
 
         fn switch_to(&mut self, index: u8) -> io::Result<()> {
+            if self.fail_switch {
+                return Err(io::Error::other("switch dead"));
+            }
             self.switches.push(index);
-            self.current = index;
+            if !self.sticky_switch {
+                self.current = index;
+            }
             Ok(())
         }
 
@@ -707,6 +726,9 @@ mod tests {
                     stream_dead: false,
                     focus: Some(7),
                     focus_err: false,
+                    fail_current: false,
+                    fail_switch: false,
+                    sticky_switch: false,
                 },
                 injector: FakeEmitter::default(),
                 pending: None,
@@ -1218,5 +1240,345 @@ mod tests {
         h.at(T + 650, SHIFT, 0);
         assert_eq!(h.ipc.switches, vec![1]);
         assert_eq!(h.injector.erases, vec![6]);
+    }
+
+    #[test]
+    fn apply_plan_reports_erase_failure() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.injector.fail_erase = true;
+        let word = h.buffer.trailing_word(reader::is_word_boundary).to_vec();
+        let plan = h.converter.convert(&word, h.ipc.current, 2).unwrap();
+        assert!(!apply_plan(&mut h.ipc, &mut h.injector, &plan));
+        assert!(h.ipc.switches.is_empty());
+    }
+
+    #[test]
+    fn apply_plan_reports_switch_failure() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.ipc.fail_switch = true;
+        let word = h.buffer.trailing_word(reader::is_word_boundary).to_vec();
+        let plan = h.converter.convert(&word, h.ipc.current, 2).unwrap();
+        assert!(!apply_plan(&mut h.ipc, &mut h.injector, &plan));
+        assert_eq!(h.injector.erases, vec![6]);
+        assert!(h.injector.replays.is_empty());
+    }
+
+    #[test]
+    fn apply_plan_reports_replay_failure() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.injector.fail_replay = true;
+        let word = h.buffer.trailing_word(reader::is_word_boundary).to_vec();
+        let plan = h.converter.convert(&word, h.ipc.current, 2).unwrap();
+        assert!(!apply_plan(&mut h.ipc, &mut h.injector, &plan));
+        assert_eq!(h.ipc.switches, vec![1]);
+    }
+
+    #[test]
+    fn apply_plan_reports_barrier_failure() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.ipc.stream_dead = true;
+        h.ipc.sticky_switch = true;
+        h.ipc.fail_current = true;
+        let word = h.buffer.trailing_word(reader::is_word_boundary).to_vec();
+        let plan = h.converter.convert(&word, h.ipc.current, 2).unwrap();
+        assert!(plan.hop.target != h.ipc.current);
+        assert!(!apply_plan(&mut h.ipc, &mut h.injector, &plan));
+    }
+
+    struct BarrierLayouts {
+        current: u8,
+        recover: io::Result<bool>,
+        wait_calls: usize,
+    }
+
+    impl LayoutBackend for BarrierLayouts {
+        fn current_layout(&mut self) -> io::Result<(u8, usize, Vec<String>)> {
+            Ok((self.current, 2, vec!["us".to_string(), "ru".to_string()]))
+        }
+        fn switch_to(&mut self, index: u8) -> io::Result<()> {
+            self.current = index;
+            Ok(())
+        }
+        fn wait_for_layout(&mut self, _target: u8) -> io::Result<()> {
+            self.wait_calls += 1;
+            Err(io::Error::other("stream dead"))
+        }
+        fn recover_barrier(&mut self, _target: u8) -> io::Result<bool> {
+            match &self.recover {
+                Ok(value) => Ok(*value),
+                Err(_) => Err(io::Error::other("reconnect dead")),
+            }
+        }
+        fn focused_window_id(&mut self) -> io::Result<Option<u64>> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn barrier_recovers_without_reconnect_when_already_there() {
+        let mut ipc = BarrierLayouts {
+            current: 0,
+            recover: Ok(true),
+            wait_calls: 0,
+        };
+        assert!(wait_for_barrier(&mut ipc, 1));
+        assert_eq!(ipc.wait_calls, 1);
+    }
+
+    #[test]
+    fn barrier_reports_reconnect_failure() {
+        let mut ipc = BarrierLayouts {
+            current: 0,
+            recover: Err(io::Error::other("dead")),
+            wait_calls: 0,
+        };
+        assert!(!wait_for_barrier(&mut ipc, 1));
+    }
+
+    #[test]
+    fn barrier_reports_layout_missing_after_reconnect() {
+        let mut ipc = BarrierLayouts {
+            current: 0,
+            recover: Ok(false),
+            wait_calls: 0,
+        };
+        assert!(!wait_for_barrier(&mut ipc, 1));
+    }
+
+    #[test]
+    fn barrier_layouts_report_switch_and_focus() {
+        let mut ipc = BarrierLayouts {
+            current: 0,
+            recover: Ok(true),
+            wait_calls: 0,
+        };
+        ipc.switch_to(1).unwrap();
+        assert_eq!(ipc.current_layout().unwrap().0, 1);
+        assert_eq!(ipc.focused_window_id().unwrap(), None);
+    }
+
+    #[test]
+    fn fake_layouts_recover_mirrors_stream_state() {
+        let mut h = Harness::new();
+        assert!(h.ipc.recover_barrier(0).unwrap());
+        h.ipc.stream_dead = true;
+        assert!(h.ipc.recover_barrier(1).is_err());
+    }
+
+    #[test]
+    fn empty_phrase_reports_nothing_to_convert() {
+        let mut h = Harness::new();
+        h.at(T, SHIFT, 1);
+        h.at(T + 50, SHIFT_RIGHT, 1);
+        h.at(T + 100, SHIFT_RIGHT, 0);
+        h.at(T + 150, SHIFT, 0);
+        assert!(h.ipc.switches.is_empty());
+        assert!(h.injector.erases.is_empty());
+    }
+
+    #[test]
+    fn convert_reports_layout_read_failure() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.ipc.fail_current = true;
+        let word = h.buffer.trailing_word(reader::is_word_boundary).to_vec();
+        let mut converter = Converter::new();
+        let mut injector = FakeEmitter::default();
+        assert!(
+            do_convert(&word, &mut converter, &mut h.ipc, &mut injector)
+                .unwrap_err()
+                .contains("layout read failed")
+        );
+    }
+
+    #[test]
+    fn convert_reports_failed_apply() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.injector.fail_erase = true;
+        let word = h.buffer.trailing_word(reader::is_word_boundary).to_vec();
+        assert!(do_convert(&word, &mut h.converter, &mut h.ipc, &mut h.injector).is_err());
+    }
+
+    #[test]
+    fn control_word_converts_immediately_when_free() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let mut daemon = Daemon {
+                triggers: &mut h.triggers,
+                buffer: &mut h.buffer,
+                converter: &mut h.converter,
+                ipc: &mut h.ipc,
+                injector: &mut h.injector,
+            };
+            handle_control(
+                ControlRequest {
+                    kind: ControlKind::Word,
+                    reply: tx,
+                },
+                h.now,
+                &mut daemon,
+                &mut h.pending,
+            );
+        }
+        let answer = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(answer.starts_with("ok bind-word"), "{answer}");
+        assert_eq!(h.ipc.switches, vec![1]);
+        assert_eq!(h.injector.erases, vec![6]);
+    }
+
+    #[test]
+    fn control_word_reports_empty_buffer() {
+        let mut h = Harness::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        {
+            let mut daemon = Daemon {
+                triggers: &mut h.triggers,
+                buffer: &mut h.buffer,
+                converter: &mut h.converter,
+                ipc: &mut h.ipc,
+                injector: &mut h.injector,
+            };
+            handle_control(
+                ControlRequest {
+                    kind: ControlKind::Word,
+                    reply: tx,
+                },
+                h.now,
+                &mut daemon,
+                &mut h.pending,
+            );
+        }
+        let answer = rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(answer.starts_with("err bind-word"), "{answer}");
+        assert!(h.ipc.switches.is_empty());
+    }
+
+    #[test]
+    fn repeat_keystroke_records_one_entry() {
+        let mut h = Harness::new();
+        h.at(T, KEY_A, 2);
+        let codes: Vec<u16> = h.buffer.phrase().iter().map(|e| e.scancode).collect();
+        assert_eq!(codes, vec![KEY_A]);
+    }
+
+    #[test]
+    fn esc_clears_the_buffer() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        assert!(!h.buffer.phrase().is_empty());
+        h.tap(T + 500, KeyCode::KEY_ESC.code());
+        assert!(h.buffer.phrase().is_empty());
+    }
+
+    #[test]
+    fn expired_gesture_is_dropped() {
+        use crate::trigger::{Gesture, GestureKind};
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.pending = Some(h.triggers.stage(
+            Gesture {
+                kind: GestureKind::Word,
+                undo: false,
+            },
+            h.now,
+        ));
+        h.now += 5000;
+        h.at(h.now, SHIFT, 1);
+        assert!(h.ipc.switches.is_empty());
+        assert!(h.pending.is_none());
+    }
+
+    #[test]
+    fn tap_switch_failure_is_tolerated() {
+        let mut h = Harness::new();
+        h.ipc.fail_switch = true;
+        h.at(T, SUPER, 1);
+        h.at(T + 100, SUPER, 0);
+        assert!(h.ipc.switches.is_empty());
+        assert!(h.injector.erases.is_empty());
+    }
+
+    #[test]
+    fn tap_layout_read_failure_is_tolerated() {
+        let mut h = Harness::new();
+        h.ipc.fail_current = true;
+        h.at(T, SUPER, 1);
+        h.at(T + 100, SUPER, 0);
+        assert!(h.ipc.switches.is_empty());
+    }
+
+    #[test]
+    fn repeated_phrase_gesture_undoes() {
+        let mut h = Harness::new();
+        h.triggers.set_pair_base(GestureKind::Phrase);
+        h.type_word(T);
+        h.at(T + 500, SHIFT, 1);
+        h.at(T + 550, SHIFT_RIGHT, 1);
+        h.at(T + 600, SHIFT_RIGHT, 0);
+        h.at(T + 650, SHIFT, 0);
+        assert_eq!(h.ipc.switches, vec![1]);
+        h.at(T + 900, SHIFT, 1);
+        h.at(T + 950, SHIFT_RIGHT, 1);
+        h.at(T + 1000, SHIFT_RIGHT, 0);
+        h.at(T + 1050, SHIFT, 0);
+        assert_eq!(h.ipc.switches, vec![1, 0]);
+        assert_eq!(h.injector.erases, vec![6, 6]);
+    }
+
+    #[test]
+    fn repeated_focus_error_stays_quiet() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.check_focus();
+        h.ipc.focus_err = true;
+        h.check_focus();
+        assert!(h.focus_broken);
+        h.check_focus();
+        assert!(h.focus_broken);
+        assert!(!h.buffer.phrase().is_empty());
+    }
+
+    #[test]
+    fn handle_key_routes_through_the_timed_entry() {
+        let mut h = Harness::new();
+        let start = Instant::now();
+        let raw = reader::RawKey {
+            scancode: KEY_A,
+            value: 1,
+        };
+        {
+            let mut daemon = Daemon {
+                triggers: &mut h.triggers,
+                buffer: &mut h.buffer,
+                converter: &mut h.converter,
+                ipc: &mut h.ipc,
+                injector: &mut h.injector,
+            };
+            handle_key(raw, &start, &mut daemon, &mut h.pending);
+        }
+        let codes: Vec<u16> = h.buffer.phrase().iter().map(|e| e.scancode).collect();
+        assert_eq!(codes, vec![KEY_A]);
+    }
+
+    #[test]
+    fn undo_path_reports_replay_detail() {
+        let mut h = Harness::new();
+        h.type_word(T);
+        h.double_shift(T + 500);
+        assert!(h.converter.has_pending_undo());
+        let mut injector = FakeEmitter::default();
+        let detail = do_undo(&mut h.converter, &mut h.ipc, &mut injector);
+        assert!(detail.is_some());
+        assert!(h.converter.has_pending_undo());
+        let mut fresh = Converter::new();
+        let mut injector = FakeEmitter::default();
+        assert_eq!(do_undo(&mut fresh, &mut h.ipc, &mut injector), None);
     }
 }
