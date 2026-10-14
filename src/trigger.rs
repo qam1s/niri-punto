@@ -996,4 +996,92 @@ mod tests {
         assert_eq!(pending.kind, GestureKind::Phrase);
         assert!(pending.undo);
     }
+
+    #[test]
+    fn meta_autorepeat_press_is_ignored() {
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::MetaLeft, T), None);
+        assert_eq!(press(&mut m, Key::MetaLeft, T + 100), None);
+        let g = release(&mut m, Key::MetaLeft, T + 150);
+        assert!(matches!(g, Some(Gesture { undo: false, .. })));
+    }
+
+    #[test]
+    fn meta_bounce_after_release_is_ignored() {
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::MetaLeft, T), None);
+        let tap = release(&mut m, Key::MetaLeft, T + 50);
+        assert!(matches!(tap, Some(Gesture { .. })));
+        assert_eq!(press(&mut m, Key::MetaLeft, T + 50 + DEBOUNCE_MS - 1), None);
+        assert_eq!(release(&mut m, Key::MetaLeft, T + 50 + DEBOUNCE_MS), None);
+    }
+
+    #[test]
+    fn held_right_shift_turns_double_shift_into_phrase() {
+        let mut m = TriggerMachine::new();
+        assert_eq!(press(&mut m, Key::ShiftRight, T), None);
+        let g = press(&mut m, Key::ShiftLeft, T + 120);
+        assert_eq!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Phrase,
+                undo: false
+            })
+        );
+    }
+
+    #[test]
+    fn bind_undo_expires_past_the_window() {
+        let mut m = TriggerMachine::new();
+        m.set_binds(vec![Bind {
+            mods: ModSet {
+                meta: true,
+                ..Default::default()
+            },
+            scancode: 38,
+            kind: GestureKind::Word,
+        }]);
+        mod_meta(&mut m, T);
+        assert!(matches!(
+            m.bind(38, T + 10),
+            Some(Gesture { undo: false, .. })
+        ));
+        assert_eq!(
+            m.bind(38, T + 10 + UNDO_WINDOW_MS + 100),
+            Some(Gesture {
+                kind: GestureKind::Word,
+                undo: false
+            })
+        );
+    }
+
+    #[test]
+    fn bind_with_ctrl_modifier() {
+        let mut m = TriggerMachine::new();
+        m.set_binds(vec![Bind {
+            mods: ModSet {
+                ctrl: true,
+                ..Default::default()
+            },
+            scancode: 38,
+            kind: GestureKind::Word,
+        }]);
+        assert_eq!(m.bind(38, T), None);
+        assert_eq!(press(&mut m, Key::CtrlLeft, T + 10), None);
+        let g = m.bind(38, T + 20);
+        assert_eq!(
+            g,
+            Some(Gesture {
+                kind: GestureKind::Word,
+                undo: false
+            })
+        );
+    }
+
+    #[test]
+    fn default_machine_matches_new() {
+        let m = TriggerMachine::default();
+        assert!(m.modifiers_free());
+        assert!(!m.shift_held());
+    }
 }
