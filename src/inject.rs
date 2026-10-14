@@ -1,11 +1,8 @@
-//! uinput injector: erase with Backspace, replay recorded scancodes.
-
 use crate::buffer::BufferEntry;
 use crate::reader::OWN_DEVICE_NAME;
 use evdev::{AttributeSet, KeyCode, KeyEvent, uinput::VirtualDevice};
 use std::io;
 
-/// One key transition to emit.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct KeyStroke {
     pub scancode: u16,
@@ -17,7 +14,6 @@ fn tap(scancode: u16, out: &mut Vec<KeyStroke>) {
     out.push(KeyStroke { scancode, value: 0 });
 }
 
-/// Backspace down/up pairs that delete `count` characters.
 pub fn erase_strokes(count: usize) -> Vec<KeyStroke> {
     let mut out = Vec::with_capacity(count * 2);
     for _ in 0..count {
@@ -55,13 +51,11 @@ pub fn replay_strokes(entries: &[BufferEntry]) -> Vec<KeyStroke> {
     out
 }
 
-/// A sink for key transitions: erase and replay.
 pub trait Emitter {
     fn erase(&mut self, count: usize) -> io::Result<()>;
     fn replay(&mut self, entries: &[BufferEntry]) -> io::Result<()>;
 }
 
-/// uinput device that emits corrections.
 pub struct Injector {
     device: VirtualDevice,
 }

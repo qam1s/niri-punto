@@ -1,5 +1,3 @@
-//! Shared test helpers for hermetic process-environment mutation.
-//!
 //! Tests run in parallel threads, so every test that mutates process-global
 //! environment must hold the shared lock for the whole mutation. Module-local
 //! locks do not serialize against other modules touching the same variable.
@@ -26,7 +24,6 @@ pub fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// Point `CARGO_HOME` at a scratch dir for one test; restores on drop.
 pub struct CargoHomeGuard {
     prior: Option<std::ffi::OsString>,
     _lock: MutexGuard<'static, ()>,

@@ -1,18 +1,13 @@
-//! Language detector.
-
 use crate::buffer::BufferEntry;
 use crate::scorer::Verdict;
 
-/// Language detector: observes remembered input, optionally scores it.
 pub trait Detector {
     fn name(&self) -> &'static str;
     #[allow(dead_code)]
     fn score(&self, entries: &[BufferEntry]) -> Option<f32>;
-    /// Verdict the intended layout of `entries`, or decline.
     fn verdict(&self, entries: &[BufferEntry]) -> Verdict;
 }
 
-/// Manual-only stub: conversion is manual, so detection always declines.
 #[allow(dead_code)]
 pub struct ManualOnly;
 
@@ -30,7 +25,6 @@ impl Detector for ManualOnly {
     }
 }
 
-/// Content-based direction verdicts from the bigram scorer.
 pub struct BigramDetector;
 
 impl Detector for BigramDetector {

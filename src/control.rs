@@ -1,12 +1,9 @@
-//! Control socket: niri-bind subcommands talk to the running daemon.
-
 use std::env;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-/// Which conversion a niri bind asked for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ControlKind {
     Word,
@@ -27,7 +24,6 @@ pub fn parse_request(line: &str) -> Option<ControlKind> {
     }
 }
 
-/// Path of the daemon's control socket.
 pub fn socket_path() -> PathBuf {
     if let Ok(path) = env::var("NIRI_PUNTO_SOCKET") {
         return PathBuf::from(path);
@@ -42,7 +38,6 @@ pub fn is_live(path: &Path) -> bool {
     UnixStream::connect(path).is_ok()
 }
 
-/// Bind the control socket for `run`.
 pub fn bind(path: &Path) -> io::Result<UnixListener> {
     if is_live(path) {
         return Err(already_running(path));
@@ -65,7 +60,6 @@ fn already_running(path: &Path) -> io::Error {
     ))
 }
 
-/// Ask the running daemon for one conversion.
 pub fn send(path: &Path, kind: ControlKind) -> io::Result<String> {
     let stream = UnixStream::connect(path).map_err(|error| {
         io::Error::new(
@@ -80,7 +74,6 @@ pub fn send(path: &Path, kind: ControlKind) -> io::Result<String> {
     Ok(reply.trim_end().to_string())
 }
 
-/// One bind request forwarded to the daemon's main loop for conversion.
 pub struct ControlRequest {
     pub kind: ControlKind,
     pub reply: Sender<String>,
@@ -100,7 +93,6 @@ fn write_reply(stream: &UnixStream, message: &str) {
     let _ = writeln!(stream, "{message}");
 }
 
-/// Serve a single connection.
 pub fn serve_one(stream: UnixStream, requests: &Sender<ControlRequest>) -> bool {
     let Some(line) = read_request_line(&stream) else {
         return false;

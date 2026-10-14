@@ -1,6 +1,3 @@
-# Pre-commit hooks, run with prek (https://github.com/j178/prek):
-#   prek install   # once per clone
-# Hooks mirror CI: cargo fmt + cargo clippy with denied warnings.
 repos:
   - repo: local
     hooks:

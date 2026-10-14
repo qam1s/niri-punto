@@ -1,17 +1,12 @@
-//! Remembered input: a log of (scancode, shift) entries.
-
-/// One unit of remembered input.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct BufferEntry {
     pub scancode: u16,
     pub shift: bool,
 }
 
-/// Bounded log of buffer entries; oldest entries are evicted past capacity.
 pub struct InputBuffer {
     entries: Vec<BufferEntry>,
     capacity: usize,
-    /// Layout index when the first entry after a clear arrived.
     birth_layout: Option<u8>,
 }
 

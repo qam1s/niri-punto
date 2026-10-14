@@ -1,6 +1,3 @@
-# Recipes: `just test`, `just lint`, `just release 0.4.0`.
-# Release only bumps the version and tags; the binary is built by CI.
-
 default: test
 
 test:
