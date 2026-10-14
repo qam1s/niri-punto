@@ -239,4 +239,14 @@ mod tests {
     fn replay_empty_emits_nothing() {
         assert!(replay_strokes(&[]).is_empty());
     }
+
+    #[test]
+    fn open_fails_without_uinput_node() {
+        let result = Injector::open();
+        if std::path::Path::new("/dev/uinput").exists() {
+            assert!(result.is_ok() || result.is_err());
+        } else {
+            assert!(result.is_err());
+        }
+    }
 }
