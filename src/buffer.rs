@@ -7,7 +7,6 @@ pub struct BufferEntry {
 pub struct InputBuffer {
     entries: Vec<BufferEntry>,
     capacity: usize,
-    birth_layout: Option<u8>,
 }
 
 pub const DEFAULT_CAPACITY: usize = 256;
@@ -17,22 +16,7 @@ impl InputBuffer {
         Self {
             entries: Vec::new(),
             capacity: capacity.max(1),
-            birth_layout: None,
         }
-    }
-
-    pub fn note_birth(&mut self, layout: u8) {
-        if self.birth_layout.is_none() {
-            self.birth_layout = Some(layout);
-        }
-    }
-
-    pub fn birth_layout(&self) -> Option<u8> {
-        self.birth_layout
-    }
-
-    pub fn reanchor(&mut self, layout: u8) {
-        self.birth_layout = Some(layout);
     }
 
     pub fn push(&mut self, entry: BufferEntry) {
@@ -45,9 +29,6 @@ impl InputBuffer {
 
     pub fn pop(&mut self) {
         self.entries.pop();
-        if self.entries.is_empty() {
-            self.birth_layout = None;
-        }
     }
 
     pub fn pop_word(&mut self, is_boundary: impl Fn(u16) -> bool) {
@@ -58,14 +39,10 @@ impl InputBuffer {
             .map(|i| i + 1)
             .unwrap_or(0);
         self.entries.truncate(cut);
-        if self.entries.is_empty() {
-            self.birth_layout = None;
-        }
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
-        self.birth_layout = None;
     }
 
     #[allow(dead_code)]
@@ -214,20 +191,6 @@ mod tests {
     }
 
     #[test]
-    fn birth_layout_sticks_for_the_fill_and_resets_on_clear() {
-        let mut buf = InputBuffer::default();
-        assert_eq!(buf.birth_layout(), None);
-        buf.note_birth(1);
-        buf.push(entry(30));
-        buf.note_birth(0);
-        assert_eq!(buf.birth_layout(), Some(1));
-        buf.clear();
-        assert_eq!(buf.birth_layout(), None);
-        buf.note_birth(0);
-        assert_eq!(buf.birth_layout(), Some(0));
-    }
-
-    #[test]
     fn pop_drops_the_most_recent_entry() {
         let mut buf = InputBuffer::default();
         for code in [30, 48, 31] {
@@ -243,17 +206,6 @@ mod tests {
         let mut buf = InputBuffer::default();
         buf.pop();
         assert_eq!(buf.len(), 0);
-        assert_eq!(buf.birth_layout(), None);
-    }
-
-    #[test]
-    fn pop_to_empty_resets_the_birth_anchor() {
-        let mut buf = InputBuffer::default();
-        buf.note_birth(1);
-        buf.push(entry(30));
-        buf.pop();
-        assert_eq!(buf.len(), 0);
-        assert_eq!(buf.birth_layout(), None);
     }
 
     #[test]
@@ -270,12 +222,10 @@ mod tests {
     #[test]
     fn pop_word_without_boundary_clears_all() {
         let mut buf = InputBuffer::default();
-        buf.note_birth(1);
         for code in [30, 48] {
             buf.push(entry(code));
         }
         buf.pop_word(is_boundary);
         assert_eq!(buf.len(), 0);
-        assert_eq!(buf.birth_layout(), None);
     }
 }

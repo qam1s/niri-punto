@@ -1,6 +1,5 @@
 use crate::buffer::BufferEntry;
-use crate::scorer::Intended;
-use crate::undo::{HasHop, LayoutCtx, LayoutHop, Reversible, UndoChain};
+use crate::undo::{LayoutCtx, LayoutHop, Reversible, UndoChain};
 use std::fmt;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -17,12 +16,6 @@ impl Reversible for ConversionPlan {
             hop: self.hop.swapped(),
             replay: self.replay.clone(),
         }
-    }
-}
-
-impl HasHop for ConversionPlan {
-    fn hop_target(&self) -> u8 {
-        self.hop.target
     }
 }
 
@@ -61,21 +54,6 @@ pub fn plan_conversion(
     })
 }
 
-pub fn plan_conversion_toward(
-    entries: &[BufferEntry],
-    target: u8,
-    ctx: LayoutCtx,
-) -> Result<ConversionPlan, ConversionError> {
-    if entries.is_empty() {
-        return Err(ConversionError::Empty);
-    }
-    Ok(ConversionPlan {
-        erase: entries.len(),
-        hop: ctx.hop_toward(target)?,
-        replay: entries.to_vec(),
-    })
-}
-
 pub struct Converter {
     chain: UndoChain<ConversionPlan>,
 }
@@ -104,37 +82,8 @@ impl Converter {
         Ok(plan)
     }
 
-    pub fn convert_toward(
-        &mut self,
-        entries: &[BufferEntry],
-        intended: Intended,
-        latin: u8,
-        current: u8,
-        layout_count: usize,
-        birth: Option<u8>,
-    ) -> Result<ConversionPlan, ConversionError> {
-        let target = intended.index_in(latin);
-        if birth.is_some_and(|b| b == current) && target == current {
-            return self.convert(entries, current, layout_count);
-        }
-        let plan = plan_conversion_toward(
-            entries,
-            target,
-            LayoutCtx {
-                current,
-                count: layout_count,
-            },
-        )?;
-        self.chain.remember(plan.clone());
-        Ok(plan)
-    }
-
     pub fn has_pending_undo(&self) -> bool {
         self.chain.has_pending_undo()
-    }
-
-    pub fn last_target(&self) -> Option<u8> {
-        self.chain.last_target()
     }
 
     pub fn undo(&mut self) -> Option<ConversionPlan> {
@@ -186,66 +135,6 @@ mod tests {
         let plan = plan_conversion(&phrase, ctx(0, 2)).unwrap();
         assert_eq!(plan.erase, 4);
         assert_eq!(plan.replay, phrase);
-    }
-
-    #[test]
-    fn toward_ignores_current_but_refuses_like_today() {
-        let plan = plan_conversion_toward(&word(), 1, ctx(1, 2)).unwrap();
-        assert_eq!((plan.hop.from, plan.hop.target), (1, 1));
-        assert_eq!(plan.erase, 6);
-        assert_eq!(
-            plan_conversion_toward(&[], 1, ctx(0, 2)),
-            Err(ConversionError::Empty)
-        );
-        assert_eq!(
-            plan_conversion_toward(&word(), 1, ctx(2, 3)),
-            plan_conversion(&word(), ctx(2, 3))
-        );
-    }
-
-    #[test]
-    fn toward_agreeing_verdict_flips_when_layout_unchanged() {
-        use crate::scorer::Intended;
-        let mut converter = Converter::new();
-        let plan = converter
-            .convert_toward(&word(), Intended::Ru, 0, 1, 2, Some(1))
-            .unwrap();
-        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
-    }
-
-    #[test]
-    fn toward_agreeing_verdict_holds_when_layout_changed() {
-        use crate::scorer::Intended;
-        let mut converter = Converter::new();
-        let plan = converter
-            .convert_toward(&word(), Intended::Ru, 0, 1, 2, Some(0))
-            .unwrap();
-        assert_eq!((plan.hop.from, plan.hop.target), (1, 1));
-    }
-
-    #[test]
-    fn toward_disagreeing_verdict_holds_when_unchanged() {
-        use crate::scorer::Intended;
-        let mut converter = Converter::new();
-        let plan = converter
-            .convert_toward(&word(), Intended::Ru, 0, 0, 2, Some(0))
-            .unwrap();
-        assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
-    }
-
-    #[test]
-    fn toward_resolves_the_intended_layout_through_latin_position() {
-        use crate::scorer::Intended;
-        let mut converter = Converter::new();
-        let plan = converter
-            .convert_toward(&word(), Intended::Ru, 1, 1, 2, None)
-            .unwrap();
-        assert_eq!((plan.hop.from, plan.hop.target), (1, 0));
-        assert_eq!(plan.erase, 6);
-        let plan = converter
-            .convert_toward(&word(), Intended::Us, 1, 0, 2, None)
-            .unwrap();
-        assert_eq!((plan.hop.from, plan.hop.target), (0, 1));
     }
 
     #[test]

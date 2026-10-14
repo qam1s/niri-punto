@@ -34,28 +34,10 @@ impl LayoutCtx {
             target: 1 - self.current,
         })
     }
-
-    pub fn hop_toward(&self, target: u8) -> Result<LayoutHop, ConversionError> {
-        debug_assert!(target <= 1, "verdict targets a pair position");
-        if self.current > 1 || self.count < 2 || target > 1 {
-            return Err(ConversionError::Layouts {
-                current: self.current,
-                count: self.count,
-            });
-        }
-        Ok(LayoutHop {
-            from: self.current,
-            target,
-        })
-    }
 }
 
 pub trait Reversible: Clone {
     fn reversed(&self) -> Self;
-}
-
-pub trait HasHop {
-    fn hop_target(&self) -> u8;
 }
 
 pub struct UndoChain<T: Reversible> {
@@ -73,13 +55,6 @@ impl<T: Reversible> UndoChain<T> {
 
     pub fn has_pending_undo(&self) -> bool {
         self.last.is_some()
-    }
-
-    pub fn last_target(&self) -> Option<u8>
-    where
-        T: HasHop,
-    {
-        self.last.as_ref().map(|step| step.hop_target())
     }
 
     pub fn undo(&mut self) -> Option<T> {
@@ -133,32 +108,6 @@ mod tests {
         );
         assert_eq!(
             ctx(0, 1).hop(),
-            Err(ConversionError::Layouts {
-                current: 0,
-                count: 1,
-            })
-        );
-    }
-
-    #[test]
-    fn hop_toward_ignores_current_but_keeps_the_pair_guard() {
-        assert_eq!(
-            ctx(1, 2).hop_toward(1).unwrap(),
-            LayoutHop { from: 1, target: 1 }
-        );
-        assert_eq!(
-            ctx(0, 2).hop_toward(1).unwrap(),
-            LayoutHop { from: 0, target: 1 }
-        );
-        assert_eq!(
-            ctx(2, 3).hop_toward(1),
-            Err(ConversionError::Layouts {
-                current: 2,
-                count: 3,
-            })
-        );
-        assert_eq!(
-            ctx(0, 1).hop_toward(1),
             Err(ConversionError::Layouts {
                 current: 0,
                 count: 1,

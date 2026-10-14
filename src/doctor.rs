@@ -1,5 +1,4 @@
 use crate::ipc::IpcClient;
-use crate::scorer::latin_index;
 use crate::setup::RULE_FILE_NAME;
 use crate::setup::SERVICE_FILE_NAME;
 use std::fmt;
@@ -298,10 +297,9 @@ pub fn run() -> i32 {
                     line(
                         "niri layouts",
                         format!(
-                            "[{}] current={} latin={}",
+                            "[{}] current={}",
                             layouts.names.join(", "),
                             layouts.current_idx,
-                            latin_index(&layouts.names)
                         ),
                     );
                     Some(layouts)

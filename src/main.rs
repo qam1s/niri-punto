@@ -1,12 +1,10 @@
 mod buffer;
 mod control;
 mod convert;
-mod detector;
 mod doctor;
 mod inject;
 mod ipc;
 mod reader;
-mod scorer;
 mod setup;
 #[cfg(test)]
 mod test_env;
@@ -18,11 +16,9 @@ mod update;
 use buffer::{BufferEntry, InputBuffer};
 use control::{ControlKind, ControlRequest};
 use convert::{ConversionPlan, Converter};
-use detector::{BigramDetector, Detector};
 use inject::{Emitter, Injector};
 use ipc::{IpcClient, LayoutBackend};
 use reader::Reader;
-use scorer::{Verdict, latin_index};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -101,28 +97,16 @@ fn wait_for_barrier(ipc: &mut impl LayoutBackend, target: u8) -> bool {
 
 fn do_convert(
     entries: &[BufferEntry],
-    phrase: &[BufferEntry],
-    birth: Option<u8>,
-    detector: &dyn Detector,
     converter: &mut Converter,
     ipc: &mut impl LayoutBackend,
     injector: &mut impl Emitter,
 ) -> Result<String, String> {
-    let (current, count, names) = ipc
+    let (current, count, _) = ipc
         .current_layout()
         .map_err(|error| format!("layout read failed: {error}"))?;
-    let plan = match detector.verdict(phrase) {
-        Verdict::Intended(intended) => converter.convert_toward(
-            entries,
-            intended,
-            latin_index(&names),
-            current,
-            count,
-            birth,
-        ),
-        Verdict::Decline => converter.convert(entries, current, count),
-    }
-    .map_err(|error| format!("skipped ({error})"))?;
+    let plan = converter
+        .convert(entries, current, count)
+        .map_err(|error| format!("skipped ({error})"))?;
     let detail = format!(
         "erase {} then replay after layout {} (from {current})",
         plan.erase, plan.hop.target
@@ -342,13 +326,8 @@ fn run(input_dir: PathBuf) {
     let mut buffer = InputBuffer::default();
     let mut converter = Converter::new();
     let mut pending: Option<PendingGesture> = None;
-    let detector = BigramDetector;
     let mut last_focus: Option<Option<u64>> = None;
     let mut focus_broken = false;
-    eprintln!(
-        "detector: {} (direction verdicts, no auto conversion)",
-        detector.name()
-    );
 
     loop {
         match reader.poll(&input_dir, CONTROL_POLL) {
@@ -362,7 +341,6 @@ fn run(input_dir: PathBuf) {
                     triggers: &mut triggers,
                     buffer: &mut buffer,
                     converter: &mut converter,
-                    detector: &detector,
                     ipc: &mut ipc,
                     injector: &mut injector,
                 };
@@ -380,7 +358,6 @@ fn run(input_dir: PathBuf) {
                 triggers: &mut triggers,
                 buffer: &mut buffer,
                 converter: &mut converter,
-                detector: &detector,
                 ipc: &mut ipc,
                 injector: &mut injector,
             };
@@ -406,7 +383,6 @@ fn handle_control(
         triggers,
         buffer,
         converter,
-        detector,
         ipc,
         injector,
     } = daemon;
@@ -430,21 +406,8 @@ fn handle_control(
     let answer = match request.kind {
         ControlKind::Word => {
             let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
-            match do_convert(
-                &word,
-                buffer.phrase(),
-                buffer.birth_layout(),
-                *detector,
-                converter,
-                &mut **ipc,
-                &mut **injector,
-            ) {
-                Ok(detail) => {
-                    if let Some(target) = converter.last_target() {
-                        buffer.reanchor(target);
-                    }
-                    format!("ok bind-word: {detail}")
-                }
+            match do_convert(&word, converter, &mut **ipc, &mut **injector) {
+                Ok(detail) => format!("ok bind-word: {detail}"),
                 Err(detail) => format!("err bind-word: {detail}"),
             }
         }
@@ -457,7 +420,6 @@ struct Daemon<'a, I: Emitter, L: LayoutBackend> {
     triggers: &'a mut TriggerMachine,
     buffer: &'a mut InputBuffer,
     converter: &'a mut Converter,
-    detector: &'a dyn Detector,
     ipc: &'a mut L,
     injector: &'a mut I,
 }
@@ -508,7 +470,6 @@ fn handle_key_at(
         triggers,
         buffer,
         converter,
-        detector,
         ipc,
         injector,
     } = daemon;
@@ -548,11 +509,6 @@ fn handle_key_at(
                 eprintln!("buffer: cleared (shortcut or action key)");
             }
         } else {
-            if buffer.birth_layout().is_none() {
-                if let Ok((current, _, _)) = ipc.current_layout() {
-                    buffer.note_birth(current);
-                }
-            }
             if raw.value == 1 {
                 if reader::is_reset(raw.scancode) {
                     buffer.clear();
@@ -593,9 +549,6 @@ fn handle_key_at(
         GestureKind::Word => {
             if staged.undo && converter.has_pending_undo() {
                 if let Some(detail) = do_undo(converter, &mut **ipc, &mut **injector) {
-                    if let Some(target) = converter.last_target() {
-                        buffer.reanchor(target);
-                    }
                     eprintln!("undo: {detail}");
                 }
                 return;
@@ -614,19 +567,8 @@ fn handle_key_at(
                 return;
             }
             let word = buffer.trailing_word(reader::is_word_boundary).to_vec();
-            match do_convert(
-                &word,
-                buffer.phrase(),
-                buffer.birth_layout(),
-                *detector,
-                converter,
-                &mut **ipc,
-                &mut **injector,
-            ) {
+            match do_convert(&word, converter, &mut **ipc, &mut **injector) {
                 Ok(detail) => {
-                    if let Some(target) = converter.last_target() {
-                        buffer.reanchor(target);
-                    }
                     eprintln!("convert: {detail}");
                 }
                 Err(detail) => eprintln!("convert: {detail}"),
@@ -635,29 +577,13 @@ fn handle_key_at(
         GestureKind::Phrase => {
             if staged.undo && converter.has_pending_undo() {
                 if let Some(detail) = do_undo(converter, &mut **ipc, &mut **injector) {
-                    if let Some(target) = converter.last_target() {
-                        buffer.reanchor(target);
-                    }
                     eprintln!("undo: {detail}");
                 }
                 return;
             }
             let phrase = buffer.phrase().to_vec();
-            match do_convert(
-                &phrase,
-                &phrase,
-                buffer.birth_layout(),
-                *detector,
-                converter,
-                &mut **ipc,
-                &mut **injector,
-            ) {
-                Ok(detail) => {
-                    if let Some(target) = converter.last_target() {
-                        buffer.reanchor(target);
-                    }
-                    eprintln!("phrase: {detail}")
-                }
+            match do_convert(&phrase, converter, &mut **ipc, &mut **injector) {
+                Ok(detail) => eprintln!("phrase: {detail}"),
                 Err(detail) => eprintln!("phrase: {detail}"),
             }
         }
@@ -668,7 +594,6 @@ fn handle_key_at(
 mod tests {
     use super::*;
     use crate::buffer::BufferEntry;
-    use crate::detector::ManualOnly;
     use crate::trigger::{Bind, ModSet};
     use evdev::KeyCode;
     use std::io;
@@ -759,7 +684,6 @@ mod tests {
         triggers: TriggerMachine,
         buffer: InputBuffer,
         converter: Converter,
-        detector: Box<dyn Detector>,
         ipc: FakeLayouts,
         injector: FakeEmitter,
         pending: Option<PendingGesture>,
@@ -770,23 +694,14 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
-            Self::with_detector(Box::new(ManualOnly))
-        }
-
-        fn with_detector(detector: Box<dyn Detector>) -> Self {
-            Self::with_detector_and_names(detector, &["us", "ru"])
-        }
-
-        fn with_detector_and_names(detector: Box<dyn Detector>, names: &[&str]) -> Self {
             Self {
                 triggers: TriggerMachine::new(),
                 buffer: InputBuffer::default(),
                 converter: Converter::new(),
-                detector,
                 ipc: FakeLayouts {
                     current: 0,
                     count: 2,
-                    names: names.iter().map(|name| name.to_string()).collect(),
+                    names: ["us", "ru"].iter().map(|name| name.to_string()).collect(),
                     switches: Vec::new(),
                     wait_calls: 0,
                     stream_dead: false,
@@ -807,7 +722,6 @@ mod tests {
                 triggers: &mut self.triggers,
                 buffer: &mut self.buffer,
                 converter: &mut self.converter,
-                detector: self.detector.as_ref(),
                 ipc: &mut self.ipc,
                 injector: &mut self.injector,
             };
@@ -819,7 +733,6 @@ mod tests {
                 triggers: &mut self.triggers,
                 buffer: &mut self.buffer,
                 converter: &mut self.converter,
-                detector: self.detector.as_ref(),
                 ipc: &mut self.ipc,
                 injector: &mut self.injector,
             };
@@ -1080,82 +993,6 @@ mod tests {
         assert!(h.ipc.switches.is_empty());
     }
 
-    const GHBTDN: [u16; 6] = [34, 35, 48, 32, 20, 49];
-
-    #[test]
-    fn diverged_layout_confident_verdict_converts_toward_intended() {
-        let mut h = Harness::with_detector(Box::new(BigramDetector));
-        h.type_codes(T, &GHBTDN);
-        h.ipc.current = 1;
-        h.double_shift(T + 500);
-        assert_eq!(h.ipc.switches, vec![1]);
-        assert_eq!(h.injector.erases, vec![6]);
-        assert_eq!(
-            h.injector.replays[0]
-                .iter()
-                .map(|e| e.scancode)
-                .collect::<Vec<_>>(),
-            GHBTDN.to_vec()
-        );
-
-        let mut today = Harness::new();
-        today.type_codes(T, &GHBTDN);
-        today.ipc.current = 1;
-        today.double_shift(T + 500);
-        assert_eq!(today.ipc.switches, vec![0]);
-    }
-
-    #[test]
-    fn unchanged_layout_agreeing_verdict_flips_for_convert_away() {
-        let mut h = Harness::with_detector(Box::new(BigramDetector));
-        h.ipc.current = 1;
-        h.type_codes(T, &GHBTDN);
-        h.at(T + 500, SUPER, 1);
-        h.at(T + 600, SUPER, 0);
-        assert_eq!(h.ipc.switches, vec![0]);
-        assert_eq!(h.injector.erases, vec![6]);
-    }
-
-    #[test]
-    fn second_word_after_a_flip_reanchors_and_converts_away() {
-        let mut h = Harness::with_detector(Box::new(BigramDetector));
-        h.type_codes(T, &GHBTDN);
-        h.double_shift(T + 500);
-        assert_eq!(h.ipc.switches, vec![1]);
-        h.at(T + 2000, KeyCode::KEY_SPACE.code(), 1);
-        h.at(T + 2010, KeyCode::KEY_SPACE.code(), 0);
-        h.type_codes(T + 2100, &GHBTDN);
-        h.at(T + 3000, SUPER, 1);
-        h.at(T + 3100, SUPER, 0);
-        assert_eq!(h.ipc.switches, vec![1, 0]);
-        assert_eq!(h.injector.erases, vec![6, 6]);
-    }
-
-    #[test]
-    fn diverged_layout_decline_matches_today_byte_identical() {
-        let mut bigram = Harness::with_detector(Box::new(BigramDetector));
-        let mut manual = Harness::new();
-        for h in [&mut bigram, &mut manual] {
-            h.type_codes(T, &[35, 23]);
-            h.ipc.current = 1;
-            h.double_shift(T + 500);
-        }
-        assert_eq!(bigram.ipc.switches, vec![0]);
-        assert_eq!(bigram.ipc.switches, manual.ipc.switches);
-        assert_eq!(bigram.injector.erases, manual.injector.erases);
-        assert_eq!(bigram.injector.replays, manual.injector.replays);
-    }
-
-    #[test]
-    fn swapped_pair_diverged_word_converts_toward_the_ru_position() {
-        let mut h = Harness::with_detector_and_names(Box::new(BigramDetector), &["ru", "us"]);
-        h.type_codes(T, &GHBTDN);
-        h.ipc.current = 1;
-        h.double_shift(T + 500);
-        assert_eq!(h.ipc.switches, vec![0]);
-        assert_eq!(h.injector.erases, vec![6]);
-    }
-
     #[test]
     fn repeated_gesture_undoes() {
         let mut h = Harness::new();
@@ -1215,7 +1052,6 @@ mod tests {
                 triggers: &mut h.triggers,
                 buffer: &mut h.buffer,
                 converter: &mut h.converter,
-                detector: h.detector.as_ref(),
                 ipc: &mut h.ipc,
                 injector: &mut h.injector,
             };
