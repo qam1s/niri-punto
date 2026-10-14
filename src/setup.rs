@@ -603,4 +603,224 @@ mod tests {
         assert!(!paths.unit_path.exists());
         assert!(runner.commands.borrow().is_empty());
     }
+
+    #[test]
+    fn paths_fall_back_to_home_config_without_xdg() {
+        let home = Path::new("/home/tester");
+        let exe = PathBuf::from("/home/tester/.local/bin/niri-punto");
+        assert_eq!(
+            paths_for(home, None, exe.clone()).unit_path,
+            home.join(".config")
+                .join("systemd")
+                .join("user")
+                .join(SERVICE_FILE_NAME)
+        );
+        assert_eq!(
+            paths_for(home, Some(""), exe.clone()).unit_path,
+            home.join(".config")
+                .join("systemd")
+                .join("user")
+                .join(SERVICE_FILE_NAME)
+        );
+        let xdg = paths_for(home, Some("/tmp/xdg"), exe.clone());
+        assert_eq!(
+            xdg.unit_path,
+            PathBuf::from("/tmp/xdg")
+                .join("systemd")
+                .join("user")
+                .join(SERVICE_FILE_NAME)
+        );
+        assert_eq!(xdg.bin_dir, home.join(".local").join("bin"));
+    }
+
+    #[test]
+    fn default_capture_reports_unsupported() {
+        let runner = FakeRunner::new();
+        let command = Command::new("echo", &["hi"]);
+        assert!(runner.capture(&command).is_err());
+    }
+
+    #[test]
+    fn real_runner_runs_and_captures() {
+        let _env = crate::test_env::lock();
+        let runner = RealRunner;
+        assert!(runner.run(&Command::new("true", &[])).is_ok());
+        assert!(runner.run(&Command::new("false", &[])).is_err());
+        assert!(
+            runner
+                .run(&Command::new("/nonexistent-niri-punto-binary", &[]))
+                .is_err()
+        );
+        let out = runner.capture(&Command::new("echo", &["hello"])).unwrap();
+        assert_eq!(out.trim(), "hello");
+        assert!(runner.capture(&Command::new("false", &[])).is_err());
+    }
+
+    #[test]
+    fn command_displays_prog_and_args() {
+        assert_eq!(
+            Command::new("systemctl", &["--user", "daemon-reload"]).to_string(),
+            "systemctl --user daemon-reload"
+        );
+        assert_eq!(Command::new("true", &[]).to_string(), "true");
+    }
+
+    #[test]
+    fn path_warning_fires_only_off_path() {
+        let _env = crate::test_env::lock();
+        let prior = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", "/usr/bin:/bin");
+        }
+        assert!(
+            path_warning(Path::new("/home/u/.local/bin"))
+                .unwrap()
+                .contains("not on $PATH")
+        );
+        unsafe {
+            std::env::set_var("PATH", format!("/usr/bin:/home/u/.local/bin:{}", "/bin"));
+        }
+        assert!(path_warning(Path::new("/home/u/.local/bin")).is_none());
+        crate::test_env::restore("PATH", prior);
+    }
+
+    #[test]
+    fn shipped_lookup_needs_a_parent_dir() {
+        assert_eq!(shipped_contrib(Path::new(""), RULE_FILE_NAME), None);
+        assert_eq!(staging_dir(), std::env::temp_dir().join("niri-punto-setup"));
+    }
+
+    struct FailingRunner {
+        fail_on: &'static str,
+    }
+
+    impl Runner for FailingRunner {
+        fn run(&self, command: &Command) -> io::Result<()> {
+            if command.prog == self.fail_on || self.fail_on == "all" {
+                return Err(io::Error::other(format!("{} broke", command.prog)));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failing_udev_step_reports_and_exits_nonzero() {
+        let (_root, paths) = test_paths("setup-udev-fail");
+        let runner = FailingRunner { fail_on: "sudo" };
+        assert_eq!(run(Options::default(), &paths, &runner), 1);
+        assert!(paths.unit_path.exists());
+    }
+
+    #[test]
+    fn failing_service_step_exits_nonzero() {
+        let (_root, paths) = test_paths("setup-service-fail");
+        let runner = FailingRunner {
+            fail_on: "systemctl",
+        };
+        let options = Options {
+            no_udev: true,
+            dry_run: false,
+        };
+        assert_eq!(run(options, &paths, &runner), 1);
+    }
+
+    #[test]
+    fn failing_unit_install_exits_nonzero() {
+        let root = scratch("setup-unit-fail");
+        let link = root.join("cfg");
+        std::os::unix::fs::symlink(root.join("nowhere"), &link).unwrap();
+        let home = root.join("home");
+        let exe = fake_exe(&root);
+        let xcfg = link.join("xcfg");
+        let paths = paths_for(&home, Some(xcfg.to_str().unwrap()), exe);
+        let runner = FakeRunner::new();
+        assert_eq!(run(Options::default(), &paths, &runner), 1);
+    }
+
+    #[test]
+    fn step_reports_dry_run_without_touching_disk() {
+        let dir = scratch("setup-step-dry");
+        let dest = dir.join("unit.service");
+        assert!(step("unit", &dest, true, || {
+            panic!("must not install on dry-run")
+        }));
+        assert!(!dest.exists());
+    }
+
+    #[test]
+    fn unit_install_fails_on_a_blocked_path() {
+        let dir = scratch("setup-unit-fail-path");
+        let blocker = dir.join("blocker");
+        std::fs::write(&blocker, b"in the way").unwrap();
+        let exe = fake_exe(&dir);
+        assert!(install_unit(&blocker.join("sub").join(SERVICE_FILE_NAME), &exe).is_err());
+        assert!(install_unit(Path::new(""), &exe).is_err());
+    }
+
+    #[test]
+    fn run_skips_path_warning_without_exe_parent() {
+        let root = scratch("setup-no-parent");
+        let home = root.join("home");
+        let paths = paths_for(
+            &home,
+            Some(root.join("xcfg").to_str().unwrap()),
+            PathBuf::from(""),
+        );
+        let runner = FakeRunner::new();
+        let options = Options {
+            no_udev: true,
+            dry_run: true,
+        };
+        assert_eq!(run(options, &paths, &runner), 0);
+    }
+
+    #[test]
+    fn no_warning_when_exe_dir_is_on_path() {
+        let _env = crate::test_env::lock();
+        let prior = std::env::var_os("PATH");
+        let dir = scratch("setup-on-path");
+        let exe = fake_exe(&dir);
+        let paths = paths_for(
+            &dir.join("home"),
+            Some(dir.join("xcfg").to_str().unwrap().to_string().as_str()),
+            exe.clone(),
+        );
+        unsafe {
+            std::env::set_var("PATH", dir.as_os_str());
+        }
+        let runner = FakeRunner::new();
+        let options = Options {
+            no_udev: true,
+            dry_run: false,
+        };
+        assert_eq!(run(options, &paths, &runner), 0);
+        crate::test_env::restore("PATH", prior);
+    }
+
+    #[test]
+    fn resolve_needs_home_and_reports_current_exe() {
+        let _env = crate::test_env::lock();
+        let prior_home = std::env::var_os("HOME");
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("HOME", "/tmp/niri-punto-resolve-home");
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let paths = resolve().unwrap();
+        assert_eq!(
+            paths.bin_dir,
+            PathBuf::from("/tmp/niri-punto-resolve-home/.local/bin")
+        );
+        assert!(
+            paths
+                .unit_path
+                .starts_with("/tmp/niri-punto-resolve-home/.config")
+        );
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        assert!(resolve().is_err());
+        crate::test_env::restore("HOME", prior_home);
+        crate::test_env::restore("XDG_CONFIG_HOME", prior_xdg);
+    }
 }
