@@ -24,6 +24,18 @@ pub fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// Restore a process-global variable saved with `std::env::var_os`.
+/// Callers must hold [`lock`] (directly or through a guard) across
+/// the save/mutate/restore sequence.
+pub fn restore(key: &str, prior: Option<std::ffi::OsString>) {
+    unsafe {
+        match prior {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+}
+
 pub struct CargoHomeGuard {
     prior: Option<std::ffi::OsString>,
     _lock: MutexGuard<'static, ()>,
@@ -51,6 +63,55 @@ impl Drop for CargoHomeGuard {
                 Some(value) => std::env::set_var("CARGO_HOME", value),
                 None => std::env::remove_var("CARGO_HOME"),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restore_handles_prior_and_missing_values() {
+        let _lock = lock();
+        unsafe {
+            std::env::set_var("NIRI_PUNTO_RESTORE_PROBE", "present");
+        }
+        let prior = std::env::var_os("NIRI_PUNTO_RESTORE_PROBE");
+        restore("NIRI_PUNTO_RESTORE_PROBE", prior);
+        assert_eq!(
+            std::env::var_os("NIRI_PUNTO_RESTORE_PROBE").as_deref(),
+            Some(std::ffi::OsStr::new("present"))
+        );
+        unsafe {
+            std::env::remove_var("NIRI_PUNTO_RESTORE_PROBE");
+        }
+        let prior = std::env::var_os("NIRI_PUNTO_RESTORE_PROBE");
+        restore("NIRI_PUNTO_RESTORE_PROBE", prior);
+        assert_eq!(std::env::var_os("NIRI_PUNTO_RESTORE_PROBE"), None);
+    }
+
+    #[test]
+    fn guard_restores_missing_cargo_home() {
+        let prior = {
+            let _lock = lock();
+            std::env::var_os("CARGO_HOME")
+        };
+        {
+            let _lock = lock();
+            unsafe {
+                std::env::remove_var("CARGO_HOME");
+            }
+        }
+        {
+            let _env = CargoHomeGuard::empty("test-env-drop-none");
+            assert!(std::env::var_os("CARGO_HOME").is_some());
+        }
+        assert_eq!(std::env::var_os("CARGO_HOME"), None);
+        assert!(scratch("test-env-scratch").is_dir());
+        {
+            let _lock = lock();
+            restore("CARGO_HOME", prior);
         }
     }
 }
