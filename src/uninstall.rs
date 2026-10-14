@@ -348,4 +348,137 @@ mod tests {
         assert!(manual.contains(doctor::MODULES_DEST));
         assert!(manual.contains(setup::STALE_RULE_DEST));
     }
+
+    #[test]
+    fn service_commands_name_systemctl() {
+        assert_eq!(user_stop().prog, "systemctl");
+        assert!(user_stop().args.contains(&"disable".to_string()));
+        assert_eq!(user_reload().to_string(), "systemctl --user daemon-reload");
+        assert_eq!(udev_commands().len(), 5);
+        assert!(udev_commands().iter().all(|command| command.prog == "sudo"));
+        assert_eq!(cargo_command().to_string(), "cargo uninstall niri-punto");
+    }
+
+    #[test]
+    fn cargo_home_falls_back_to_home_dir() {
+        let _env = crate::test_env::lock();
+        let prior_cargo = std::env::var_os("CARGO_HOME");
+        let prior_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("CARGO_HOME", "/tmp/niri-punto-cargo-home");
+            std::env::set_var("HOME", "/tmp/niri-punto-home");
+        }
+        assert_eq!(
+            cargo_home(),
+            Some(PathBuf::from("/tmp/niri-punto-cargo-home"))
+        );
+        unsafe {
+            std::env::remove_var("CARGO_HOME");
+        }
+        assert_eq!(
+            cargo_home(),
+            Some(PathBuf::from("/tmp/niri-punto-home/.cargo"))
+        );
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        assert_eq!(cargo_copy(), None);
+        crate::test_env::restore("CARGO_HOME", prior_cargo);
+        crate::test_env::restore("HOME", prior_home);
+    }
+
+    #[test]
+    fn cargo_copy_needs_an_existing_binary() {
+        let cargo = scratch("uninstall-cargo-copy-absent");
+        let _env = CargoHomeGuard::point_at(&cargo);
+        assert_eq!(cargo_copy(), None);
+    }
+
+    struct FailOnRunner {
+        fail_on: &'static str,
+    }
+
+    impl Runner for FailOnRunner {
+        fn run(&self, command: &Command) -> io::Result<()> {
+            if command.prog == self.fail_on {
+                return Err(io::Error::other(format!("{} broke", command.prog)));
+            }
+            self_commands_push(command);
+            Ok(())
+        }
+    }
+
+    fn self_commands_push(_command: &Command) {}
+
+    #[test]
+    fn failing_stop_exits_nonzero() {
+        let (_root, paths) = installed_paths("uninstall-stop-fail");
+        let _env = CargoHomeGuard::empty("uninstall-env-stop-fail");
+        let runner = FailOnRunner {
+            fail_on: "systemctl",
+        };
+        assert_eq!(run(Options::default(), &paths, &runner), 1);
+    }
+
+    #[test]
+    fn failing_udev_step_exits_nonzero() {
+        let (_root, paths) = installed_paths("uninstall-udev-fail");
+        let _env = CargoHomeGuard::empty("uninstall-env-udev-fail");
+        let runner = FailOnRunner { fail_on: "sudo" };
+        assert_eq!(run(Options::default(), &paths, &runner), 1);
+    }
+
+    #[test]
+    fn unreadable_file_blocks_removal() {
+        let dir = scratch("uninstall-remove-fail");
+        let blocked = dir.join("blocked");
+        std::fs::create_dir_all(&blocked).unwrap();
+        assert!(!remove(&blocked, "unit", false));
+        assert!(remove(&dir.join("missing"), "unit", false));
+        assert!(remove(&blocked, "unit", true));
+    }
+
+    #[test]
+    fn failing_reload_exits_nonzero() {
+        struct ReloadFails {
+            calls: RefCell<usize>,
+        }
+        impl Runner for ReloadFails {
+            fn run(&self, _command: &Command) -> io::Result<()> {
+                let mut calls = self.calls.borrow_mut();
+                *calls += 1;
+                if *calls == 2 {
+                    return Err(io::Error::other("reload broke"));
+                }
+                Ok(())
+            }
+        }
+        let (_root, paths) = installed_paths("uninstall-reload-fail");
+        let _env = CargoHomeGuard::empty("uninstall-env-reload-fail");
+        let runner = ReloadFails {
+            calls: RefCell::new(0),
+        };
+        assert_eq!(run(Options::default(), &paths, &runner), 1);
+    }
+
+    #[test]
+    fn blocked_binary_path_exits_nonzero() {
+        let (_root, paths) = installed_paths("uninstall-blocked-binary");
+        let _env = CargoHomeGuard::empty("uninstall-env-blocked-binary");
+        let binary = paths.bin_dir.join("niri-punto");
+        std::fs::remove_file(&binary).unwrap();
+        std::fs::create_dir_all(&binary).unwrap();
+        let runner = FakeRunner::new();
+        assert_eq!(run(Options::default(), &paths, &runner), 1);
+    }
+
+    #[test]
+    fn blocked_unit_path_exits_nonzero() {
+        let (_root, paths) = installed_paths("uninstall-blocked-unit");
+        let _env = CargoHomeGuard::empty("uninstall-env-blocked-unit");
+        std::fs::remove_file(&paths.unit_path).unwrap();
+        std::fs::create_dir_all(&paths.unit_path).unwrap();
+        let runner = FakeRunner::new();
+        assert_eq!(run(Options::default(), &paths, &runner), 1);
+    }
 }
