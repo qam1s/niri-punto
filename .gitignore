@@ -1,6 +1,8 @@
 # Build output
 /target/
 /builds/
+/result
+/result-*
 **/*.rs.bk
 
 # Debug symbols
@@ -20,8 +22,5 @@
 /tmp/
 .scratch/
 
-# Local docs and drafts (not published)
+# Local docs and drafts
 docs/
-
-# Personal agent config
-.opencode/
