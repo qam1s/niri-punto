@@ -1,5 +1,5 @@
 _hint() {
-	echo "==> niri-punto: run 'niri-punto setup' to create the default config,"
+	echo "==> niri-punto: run 'niri-punto setup' to install the user unit,"
 	echo "    then 'systemctl --user enable --now niri-punto.service'."
 	echo "    Load the driver once with 'sudo modprobe uinput' (or reboot)."
 }

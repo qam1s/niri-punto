@@ -1,9 +1,5 @@
-//! Shared undo chain and layout pair guard for both conversion paths.
-
-use crate::config::LayoutPair;
 use crate::convert::ConversionError;
 
-/// Layout hop by explicit index.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct LayoutHop {
     pub from: u8,
@@ -19,21 +15,18 @@ impl LayoutHop {
     }
 }
 
-/// The layout context a conversion is planned in.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct LayoutCtx<'a> {
+pub struct LayoutCtx {
     pub current: u8,
     pub count: usize,
-    pub pair: &'a LayoutPair,
 }
 
-impl LayoutCtx<'_> {
+impl LayoutCtx {
     pub fn hop(&self) -> Result<LayoutHop, ConversionError> {
         if self.current > 1 || self.count < 2 {
             return Err(ConversionError::Layouts {
                 current: self.current,
                 count: self.count,
-                pair: self.pair.clone(),
             });
         }
         Ok(LayoutHop {
@@ -48,7 +41,6 @@ impl LayoutCtx<'_> {
             return Err(ConversionError::Layouts {
                 current: self.current,
                 count: self.count,
-                pair: self.pair.clone(),
             });
         }
         Ok(LayoutHop {
@@ -58,17 +50,14 @@ impl LayoutCtx<'_> {
     }
 }
 
-/// A plan step that knows its own reverse.
 pub trait Reversible: Clone {
     fn reversed(&self) -> Self;
 }
 
-/// A plan step carrying a layout hop.
 pub trait HasHop {
     fn hop_target(&self) -> u8;
 }
 
-/// Tracks the convert/undo chain across gestures.
 pub struct UndoChain<T: Reversible> {
     last: Option<T>,
 }
@@ -118,86 +107,61 @@ mod tests {
         }
     }
 
-    fn pair() -> LayoutPair {
-        LayoutPair::new("us", "ru").unwrap()
-    }
-
-    fn ctx(pair: &LayoutPair, current: u8, count: usize) -> LayoutCtx<'_> {
-        LayoutCtx {
-            current,
-            count,
-            pair,
-        }
+    fn ctx(current: u8, count: usize) -> LayoutCtx {
+        LayoutCtx { current, count }
     }
 
     #[test]
     fn hop_points_at_the_other_pair_position() {
-        let pair = pair();
-        assert_eq!(
-            ctx(&pair, 0, 2).hop().unwrap(),
-            LayoutHop { from: 0, target: 1 }
-        );
-        assert_eq!(
-            ctx(&pair, 1, 2).hop().unwrap(),
-            LayoutHop { from: 1, target: 0 }
-        );
+        assert_eq!(ctx(0, 2).hop().unwrap(), LayoutHop { from: 0, target: 1 });
+        assert_eq!(ctx(1, 2).hop().unwrap(), LayoutHop { from: 1, target: 0 });
     }
 
     #[test]
     fn hop_inside_the_pair_survives_extra_layouts() {
-        let pair = pair();
-        assert_eq!(
-            ctx(&pair, 1, 3).hop().unwrap(),
-            LayoutHop { from: 1, target: 0 }
-        );
+        assert_eq!(ctx(1, 3).hop().unwrap(), LayoutHop { from: 1, target: 0 });
     }
 
     #[test]
-    fn hop_refuses_a_third_language_and_names_the_pair() {
-        let pair = pair();
+    fn hop_refuses_a_third_language() {
         assert_eq!(
-            ctx(&pair, 2, 3).hop(),
+            ctx(2, 3).hop(),
             Err(ConversionError::Layouts {
                 current: 2,
                 count: 3,
-                pair: pair.clone(),
             })
         );
         assert_eq!(
-            ctx(&pair, 0, 1).hop(),
+            ctx(0, 1).hop(),
             Err(ConversionError::Layouts {
                 current: 0,
                 count: 1,
-                pair: pair.clone(),
             })
         );
     }
 
     #[test]
     fn hop_toward_ignores_current_but_keeps_the_pair_guard() {
-        let pair = pair();
         assert_eq!(
-            ctx(&pair, 1, 2).hop_toward(1).unwrap(),
+            ctx(1, 2).hop_toward(1).unwrap(),
             LayoutHop { from: 1, target: 1 }
         );
         assert_eq!(
-            ctx(&pair, 0, 2).hop_toward(1).unwrap(),
+            ctx(0, 2).hop_toward(1).unwrap(),
             LayoutHop { from: 0, target: 1 }
         );
         assert_eq!(
-            ctx(&pair, 2, 3).hop_toward(1),
+            ctx(2, 3).hop_toward(1),
             Err(ConversionError::Layouts {
                 current: 2,
                 count: 3,
-                pair: pair.clone(),
             })
         );
         assert_eq!(
-            ctx(&pair, 0, 1).hop_toward(1),
+            ctx(0, 1).hop_toward(1),
             Err(ConversionError::Layouts {
                 current: 0,
                 count: 1,
-                pair: pair.clone(),
             })
         );
     }

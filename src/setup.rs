@@ -1,51 +1,44 @@
-//! `setup`: fresh-machine install without a package manager.
-
-use crate::config::{self, MODULES_FILE_NAME, RULE_FILE_NAME};
 use crate::doctor;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Shipped unit, rule and modules-load entry, embedded so `setup` works
-/// from the bare binary.
 pub const UNIT_SOURCE: &str = include_str!("../contrib/niri-punto.service");
 pub const RULE_SOURCE: &str = include_str!("../contrib/70-niri-punto.rules");
 pub const MODULES_SOURCE: &str = include_str!("../contrib/niri-punto.conf");
 
-/// Old rule name, removed on upgrade.
 pub const STALE_RULE_DEST: &str = "/etc/udev/rules.d/99-niri-punto.rules";
 
 pub const SERVICE_FILE_NAME: &str = "niri-punto.service";
 
+/// File name of the udev rule, shared with `doctor`.
+pub const RULE_FILE_NAME: &str = "70-niri-punto.rules";
+
+/// File name of the modules-load entry that pulls in `uinput` at boot.
+pub const MODULES_FILE_NAME: &str = "niri-punto.conf";
+
 /// System binary dir owned by a package manager. A `setup` running from
 /// here skips the unit and udev steps (the package owns those files)
-/// and only manages the default config.
+/// and only enables the service.
 pub const PACKAGED_BIN_DIR: &str = "/usr/bin";
 
-/// Whether `exe` runs from a packaged install (e.g. `/usr/bin/niri-punto`
-/// from the AUR package, or `/nix/store/.../bin/niri-punto` on NixOS)
-/// rather than a user-local copy.
 pub fn is_packaged(exe: &Path) -> bool {
     exe.parent()
         .is_some_and(|dir| dir == Path::new(PACKAGED_BIN_DIR) || dir.starts_with("/nix/store"))
 }
 
-/// CLI flags for `setup`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Options {
     pub no_udev: bool,
     pub dry_run: bool,
 }
 
-/// Resolved install locations.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Paths {
     pub bin_dir: PathBuf,
     pub unit_path: PathBuf,
-    pub config_path: PathBuf,
     pub exe: PathBuf,
 }
 
-/// Pure constructor over explicit homes; [`resolve`] is the env wrapper.
 pub fn paths_for(home: &Path, xdg_config_home: Option<&str>, exe: PathBuf) -> Paths {
     Paths {
         bin_dir: home.join(".local").join("bin"),
@@ -56,12 +49,10 @@ pub fn paths_for(home: &Path, xdg_config_home: Option<&str>, exe: PathBuf) -> Pa
             };
             base.join("systemd").join("user").join(SERVICE_FILE_NAME)
         },
-        config_path: config::config_path_for(home, xdg_config_home),
         exe,
     }
 }
 
-/// Resolve install locations from `$HOME` / `$XDG_CONFIG_HOME`.
 pub fn resolve() -> io::Result<Paths> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
@@ -71,7 +62,6 @@ pub fn resolve() -> io::Result<Paths> {
     Ok(paths_for(&home, xdg.as_deref(), exe))
 }
 
-/// One external command.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Command {
     pub prog: String,
@@ -97,18 +87,15 @@ impl std::fmt::Display for Command {
     }
 }
 
-/// Executes (or observes) the privileged and daemon-reload steps.
 pub trait Runner {
     fn run(&self, command: &Command) -> io::Result<()>;
 
-    /// Run a command and capture its stdout. Fakes may not support it.
     fn capture(&self, command: &Command) -> io::Result<String> {
         let _ = command;
         Err(io::Error::other("command output capture is not supported"))
     }
 }
 
-/// Really spawns the command.
 pub struct RealRunner;
 
 impl Runner for RealRunner {
@@ -135,12 +122,9 @@ impl Runner for RealRunner {
     }
 }
 
-/// Placeholder in the shipped unit replaced with the running binary's path.
 pub const EXE_PLACEHOLDER: &str = "@@NIRI_PUNTO_EXE@@";
 
-/// Render the unit with `ExecStart` pointing at the binary `setup` runs from.
 pub fn render_unit(exe: &Path) -> String {
-    // `current_exe()` is absolute, so the unit keeps working after `setup` exits.
     UNIT_SOURCE.replace(EXE_PLACEHOLDER, &exe.display().to_string())
 }
 
@@ -150,10 +134,6 @@ pub fn install_unit(dest: &Path, exe: &Path) -> io::Result<()> {
     }
     std::fs::write(dest, render_unit(exe))?;
     Ok(())
-}
-
-pub fn write_default_config(dest: &Path) -> io::Result<bool> {
-    config::ensure_default_at(dest)
 }
 
 fn shipped_contrib(exe: &Path, name: &str) -> Option<PathBuf> {
@@ -187,7 +167,6 @@ pub fn modules_source(exe: &Path, staging_dir: &Path) -> io::Result<PathBuf> {
     file_source(exe, staging_dir, MODULES_FILE_NAME, MODULES_SOURCE)
 }
 
-/// User-level daemon reload + enable.
 pub fn user_commands() -> Vec<Command> {
     vec![
         Command::new("systemctl", &["--user", "daemon-reload"]),
@@ -198,7 +177,6 @@ pub fn user_commands() -> Vec<Command> {
     ]
 }
 
-/// The escalated udev step.
 pub fn udev_commands(rule_src: &Path, modules_src: &Path) -> Vec<Command> {
     let rule = rule_src.to_string_lossy().to_string();
     let modules = modules_src.to_string_lossy().to_string();
@@ -224,7 +202,6 @@ pub fn udev_commands(rule_src: &Path, modules_src: &Path) -> Vec<Command> {
     ]
 }
 
-/// Manual fallback printed with `--no-udev`.
 pub fn manual_udev_command(rule_src: &Path, modules_src: &Path) -> String {
     udev_commands(rule_src, modules_src)
         .iter()
@@ -248,12 +225,11 @@ pub fn staging_dir() -> PathBuf {
     std::env::temp_dir().join("niri-punto-setup")
 }
 
-/// Run the install. Returns the process exit code.
 pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
     let packaged = is_packaged(&paths.exe);
     if packaged {
         println!(
-            "packaged install detected ({}): managing the config only",
+            "packaged install detected ({}): enabling the service only",
             paths.exe.display()
         );
         println!("unit: owned by the package, skipped");
@@ -264,22 +240,6 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
     }
     if !packaged {
         println!("unit: ExecStart={}", paths.exe.display());
-    }
-
-    if options.dry_run {
-        println!(
-            "[dry-run] write default config {}",
-            paths.config_path.display()
-        );
-    } else {
-        match write_default_config(&paths.config_path) {
-            Ok(true) => println!("config: wrote {}", paths.config_path.display()),
-            Ok(false) => println!("config: kept existing {}", paths.config_path.display()),
-            Err(error) => {
-                eprintln!("config: {error}");
-                return 1;
-            }
-        }
     }
 
     if packaged {
@@ -346,7 +306,6 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
     0
 }
 
-/// Run one external step.
 fn exec(runner: &dyn Runner, dry_run: bool, command: &Command) -> io::Result<()> {
     if dry_run {
         println!("[dry-run] {command}");
@@ -394,7 +353,6 @@ fn step(name: &str, dest: &Path, dry_run: bool, install: impl FnOnce() -> io::Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::DEFAULT_CONFIG;
     use std::cell::RefCell;
 
     struct FakeRunner {
@@ -449,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn packaged_run_manages_only_the_config() {
+    fn packaged_run_only_enables_the_service() {
         let root = scratch("setup-packaged");
         let home = root.join("home");
         let paths = paths_for(
@@ -461,20 +419,9 @@ mod tests {
         assert_eq!(run(Options::default(), &paths, &runner), 0);
         assert!(!paths.bin_dir.join("niri-punto").exists());
         assert!(!paths.unit_path.exists());
-        assert_eq!(
-            std::fs::read_to_string(&paths.config_path).unwrap(),
-            DEFAULT_CONFIG
-        );
         let commands = runner.commands.borrow();
         assert!(commands.iter().all(|command| command.prog != "sudo"));
         assert_eq!(commands.len(), 2);
-    }
-
-    #[test]
-    fn default_config_is_valid_and_pairs_us_ru() {
-        let pair = config::parse(DEFAULT_CONFIG).unwrap();
-        assert_eq!(pair.first, "us");
-        assert_eq!(pair.second, "ru");
     }
 
     #[test]
@@ -490,20 +437,6 @@ mod tests {
         assert!(RULE_SOURCE.contains("uaccess"));
         assert!(RULE_SOURCE.contains("SUBSYSTEM==\"input\""));
         assert!(RULE_SOURCE.contains("KERNEL==\"uinput\""));
-    }
-
-    #[test]
-    fn default_config_is_never_clobbered() {
-        let dir = scratch("setup-config");
-        let dest = dir.join("config.kdl");
-        assert!(write_default_config(&dest).unwrap());
-        assert_eq!(std::fs::read_to_string(&dest).unwrap(), DEFAULT_CONFIG);
-        std::fs::write(&dest, "layout \"de\" \"fr\"\n").unwrap();
-        assert!(!write_default_config(&dest).unwrap());
-        assert_eq!(
-            std::fs::read_to_string(&dest).unwrap(),
-            "layout \"de\" \"fr\"\n"
-        );
     }
 
     #[test]
@@ -623,10 +556,6 @@ mod tests {
         assert!(!paths.bin_dir.join("niri-punto").exists());
         let unit = std::fs::read_to_string(&paths.unit_path).unwrap();
         assert!(unit.contains(&format!("ExecStart={}", paths.exe.display())));
-        assert_eq!(
-            std::fs::read_to_string(&paths.config_path).unwrap(),
-            DEFAULT_CONFIG
-        );
         let commands = runner.commands.borrow();
         assert_eq!(commands.len(), 8);
         assert!(commands[..6].iter().all(|command| command.prog == "sudo"));
@@ -638,16 +567,14 @@ mod tests {
     }
 
     #[test]
-    fn rerun_keeps_config_and_reinstalls_the_rest() {
+    fn rerun_reinstalls_the_unit() {
         let (_root, paths) = test_paths("setup-rerun");
         let runner = FakeRunner::new();
         assert_eq!(run(Options::default(), &paths, &runner), 0);
-        std::fs::write(&paths.config_path, "layout \"de\" \"fr\"\n").unwrap();
+        let before = std::fs::read_to_string(&paths.unit_path).unwrap();
+        assert!(before.contains(&format!("ExecStart={}", paths.exe.display())));
         assert_eq!(run(Options::default(), &paths, &runner), 0);
-        assert_eq!(
-            std::fs::read_to_string(&paths.config_path).unwrap(),
-            "layout \"de\" \"fr\"\n"
-        );
+        assert_eq!(std::fs::read_to_string(&paths.unit_path).unwrap(), before);
     }
 
     #[test]
@@ -674,7 +601,6 @@ mod tests {
         };
         assert_eq!(run(options, &paths, &runner), 0);
         assert!(!paths.unit_path.exists());
-        assert!(!paths.config_path.exists());
         assert!(runner.commands.borrow().is_empty());
     }
 }

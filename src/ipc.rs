@@ -1,34 +1,26 @@
-//! niri IPC client: layout index reads, index switches, event barrier.
-
 use niri_ipc::{
     Action, Event, KeyboardLayouts, LayoutSwitchTarget, Request, Response, socket::Socket,
 };
 use std::io;
 use std::time::Duration;
 
-/// Base delay for IPC reconnect backoff.
 pub const RECONNECT_BASE_MS: u64 = 500;
-/// Backoff never waits longer than this between attempts.
 pub const RECONNECT_MAX_MS: u64 = 10_000;
-/// Reconnect attempts before giving up.
 pub const RECONNECT_ATTEMPTS: u32 = 6;
 
-/// Backoff delay before reconnect `attempt` (0-based).
 pub fn backoff_delay(attempt: u32) -> Duration {
     let doubled = RECONNECT_BASE_MS.saturating_mul(1u64 << attempt.min(20));
     Duration::from_millis(doubled.min(RECONNECT_MAX_MS))
 }
 
-/// Layout backend: layout index reads, index switches, event barrier.
 pub trait LayoutBackend {
-    fn current_layout(&mut self) -> io::Result<(u8, usize)>;
+    fn current_layout(&mut self) -> io::Result<(u8, usize, Vec<String>)>;
     fn switch_to(&mut self, index: u8) -> io::Result<()>;
     fn wait_for_layout(&mut self, target: u8) -> io::Result<()>;
     fn recover_barrier(&mut self, target: u8) -> io::Result<bool>;
     fn focused_window_id(&mut self) -> io::Result<Option<u64>>;
 }
 
-/// Client holding the request socket and the event-stream reader.
 pub struct IpcClient {
     requests: Socket,
     read_event: Box<dyn FnMut() -> io::Result<Event>>,
@@ -44,7 +36,6 @@ impl IpcClient {
         })
     }
 
-    /// Connect with backoff, for compositor restarts.
     pub fn connect_with_retry() -> io::Result<Self> {
         let mut last = io::Error::other("no attempts ran");
         for attempt in 0..RECONNECT_ATTEMPTS {
@@ -65,7 +56,6 @@ impl IpcClient {
         Err(last)
     }
 
-    /// Full layout state: names in index order plus the current index.
     pub fn layouts(&mut self) -> io::Result<KeyboardLayouts> {
         match self.requests.send(Request::KeyboardLayouts) {
             Ok(Ok(Response::KeyboardLayouts(layouts))) => Ok(layouts),
@@ -82,9 +72,9 @@ impl IpcClient {
 }
 
 impl LayoutBackend for IpcClient {
-    fn current_layout(&mut self) -> io::Result<(u8, usize)> {
+    fn current_layout(&mut self) -> io::Result<(u8, usize, Vec<String>)> {
         let layouts = self.layouts()?;
-        Ok((layouts.current_idx, layouts.names.len()))
+        Ok((layouts.current_idx, layouts.names.len(), layouts.names))
     }
 
     fn focused_window_id(&mut self) -> io::Result<Option<u64>> {
@@ -133,7 +123,7 @@ impl LayoutBackend for IpcClient {
             match subscribe_events() {
                 Ok(read_event) => {
                     self.read_event = read_event;
-                    let (current, _) = LayoutBackend::current_layout(self)?;
+                    let (current, _, _) = LayoutBackend::current_layout(self)?;
                     return Ok(current == target);
                 }
                 Err(error) => {
@@ -169,7 +159,6 @@ fn subscribe_events() -> io::Result<Box<dyn FnMut() -> io::Result<Event>>> {
     Ok(Box::new(events.read_events()))
 }
 
-/// Whether `event` confirms `target` is now the active layout.
 pub fn event_is_layout(event: &Event, target: u8) -> bool {
     match event {
         Event::KeyboardLayoutSwitched { idx } => *idx == target,

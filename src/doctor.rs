@@ -1,87 +1,17 @@
-//! `doctor`: check devices, permissions, socket, layouts.
-
-use crate::config::{self, LayoutPair, RULE_FILE_NAME};
 use crate::ipc::IpcClient;
+use crate::scorer::latin_index;
+use crate::setup::RULE_FILE_NAME;
 use crate::setup::SERVICE_FILE_NAME;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-/// Where keyboard nodes live.
 pub const INPUT_DIR: &str = "/dev/input";
-/// Where `setup` installs the uaccess rule.
 pub const RULE_DEST: &str = "/etc/udev/rules.d/70-niri-punto.rules";
-/// Where `setup` installs the uinput modules-load entry.
 pub const MODULES_DEST: &str = "/etc/modules-load.d/niri-punto.conf";
-/// The injection device the daemon opens.
 pub const UINPUT_NODE: &str = "/dev/uinput";
-/// sysfs presence of the uinput driver (missing = dead static node).
 pub const UINPUT_SYSFS: &str = "/sys/class/misc/uinput";
 
-/// A layout correspondence finding between the configured pair and niri.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub enum LayoutFinding {
-    CountMismatch {
-        actual: usize,
-        pair: LayoutPair,
-    },
-    CurrentOutsidePair {
-        current: u8,
-        count: usize,
-        active: String,
-        pair: LayoutPair,
-    },
-}
-
-impl fmt::Display for LayoutFinding {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CountMismatch { actual, pair } => write!(
-                f,
-                "niri reports {actual} layouts, config holds pair \
-                 (\"{}\", \"{}\"): conversion works inside the pair only",
-                pair.first, pair.second,
-            ),
-            Self::CurrentOutsidePair {
-                current,
-                count,
-                active,
-                pair,
-            } => write!(
-                f,
-                "current layout {current} (\"{active}\", of {count}) is outside \
-                 the configured pair (\"{}\", \"{}\"): a third language is \
-                 active, conversion will refuse until you switch back",
-                pair.first, pair.second,
-            ),
-        }
-    }
-}
-
-/// Compare the configured pair against niri's layout state.
-pub fn check_layouts(pair: &LayoutPair, names: &[String], current: u8) -> Vec<LayoutFinding> {
-    let mut findings = Vec::new();
-    if names.len() != 2 {
-        findings.push(LayoutFinding::CountMismatch {
-            actual: names.len(),
-            pair: pair.clone(),
-        });
-    }
-    if current > 1 {
-        findings.push(LayoutFinding::CurrentOutsidePair {
-            current,
-            count: names.len(),
-            active: names
-                .get(current as usize)
-                .cloned()
-                .unwrap_or_else(|| "unknown".to_string()),
-            pair: pair.clone(),
-        });
-    }
-    findings
-}
-
-/// How the udev rule fares.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum RuleCheck {
     Ok,
@@ -102,7 +32,6 @@ impl fmt::Display for RuleCheck {
     }
 }
 
-/// Assess rule content: `None` when the file could not be read.
 pub fn assess_rule(content: Option<&str>) -> RuleCheck {
     match content {
         Some(text) if text.contains("uaccess") => RuleCheck::Ok,
@@ -111,12 +40,10 @@ pub fn assess_rule(content: Option<&str>) -> RuleCheck {
     }
 }
 
-/// Read the installed rule, if any.
 pub fn read_rule() -> Option<String> {
     std::fs::read_to_string(RULE_DEST).ok()
 }
 
-/// Where `setup` writes the user unit it registers the binary with.
 pub fn unit_path() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let base = std::env::var("XDG_CONFIG_HOME")
@@ -127,12 +54,31 @@ pub fn unit_path() -> Option<PathBuf> {
     Some(base.join("systemd").join("user").join(SERVICE_FILE_NAME))
 }
 
-/// Read the installed user unit, if any.
+/// Packaged unit locations (NixOS module, traditional packages),
+/// checked when no user unit exists.
+pub const SYSTEM_UNIT_PATHS: [&str; 2] = [
+    "/etc/systemd/user/niri-punto.service",
+    "/usr/lib/systemd/user/niri-punto.service",
+];
+
 pub fn read_unit_at(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
 }
 
-/// The binary a unit file starts: first token of the `ExecStart` line.
+pub fn pick_unit(user: Option<PathBuf>, system: &[PathBuf]) -> Option<PathBuf> {
+    if let Some(path) = user {
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    system.iter().find(|path| path.exists()).cloned()
+}
+
+pub fn locate_unit() -> Option<PathBuf> {
+    let system: Vec<PathBuf> = SYSTEM_UNIT_PATHS.iter().map(PathBuf::from).collect();
+    pick_unit(unit_path(), &system)
+}
+
 pub fn unit_exec_target(unit: &str) -> Option<PathBuf> {
     unit.lines().find_map(|line| {
         let value = line.trim().strip_prefix("ExecStart=")?;
@@ -148,7 +94,6 @@ fn is_executable_file(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// How the registered unit fares.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UnitCheck {
     Ok { exe: PathBuf },
@@ -181,7 +126,6 @@ impl fmt::Display for UnitCheck {
     }
 }
 
-/// Assess unit content: `None` when the file could not be read.
 pub fn check_unit_exec(content: Option<&str>) -> UnitCheck {
     let Some(text) = content else {
         return UnitCheck::Missing;
@@ -196,7 +140,6 @@ pub fn check_unit_exec(content: Option<&str>) -> UnitCheck {
     }
 }
 
-/// How /dev/uinput fares.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UinputCheck {
     Ok,
@@ -226,7 +169,6 @@ impl fmt::Display for UinputCheck {
     }
 }
 
-/// Probe the injection device without side effects.
 pub fn check_uinput(node: &Path, sysfs: &Path) -> UinputCheck {
     if !node.exists() {
         return UinputCheck::Missing;
@@ -239,14 +181,12 @@ pub fn check_uinput(node: &Path, sysfs: &Path) -> UinputCheck {
     }
 }
 
-/// One input node probe.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DeviceProbe {
     pub path: PathBuf,
     pub readable_keyboard: bool,
 }
 
-/// List `/dev/input/event*` nodes and probe readability.
 pub fn probe_input_dir(input_dir: &Path) -> Vec<DeviceProbe> {
     let mut probes = Vec::new();
     let Ok(dir) = std::fs::read_dir(input_dir) else {
@@ -282,31 +222,8 @@ fn line(key: &str, value: impl fmt::Display) {
     println!("{key}: {value}");
 }
 
-/// Run the full checklist. Returns the process exit code.
 pub fn run() -> i32 {
     let mut failed = false;
-
-    let config_path = config::config_path();
-    let pair = match config::load() {
-        Ok(pair) => {
-            line(
-                "config",
-                format!(
-                    "{} (\"{}\", \"{}\")",
-                    config_path.display(),
-                    pair.first,
-                    pair.second
-                ),
-            );
-            Some(pair)
-        }
-        Err(error) => {
-            failed = true;
-            line("config", format!("{}: {error}", config_path.display()));
-            println!("  hint: run `niri-punto setup` to write the default config");
-            None
-        }
-    };
 
     let probes = probe_input_dir(Path::new(INPUT_DIR));
     let readable = probes
@@ -353,7 +270,7 @@ pub fn run() -> i32 {
     }
     line("uinput", format!("{UINPUT_NODE}: {uinput}"));
 
-    match unit_path() {
+    match locate_unit() {
         Some(path) => {
             let check = check_unit_exec(read_unit_at(&path).as_deref());
             if !matches!(check, UnitCheck::Ok { .. }) {
@@ -363,7 +280,13 @@ pub fn run() -> i32 {
         }
         None => {
             failed = true;
-            line("service", "$HOME is unset: cannot locate user unit");
+            match unit_path() {
+                Some(path) => line(
+                    "service",
+                    format!("{}: {}", path.display(), UnitCheck::Missing),
+                ),
+                None => line("service", "$HOME is unset: cannot locate user unit"),
+            }
         }
     }
 
@@ -375,9 +298,10 @@ pub fn run() -> i32 {
                     line(
                         "niri layouts",
                         format!(
-                            "[{}] current={}",
+                            "[{}] current={} latin={}",
                             layouts.names.join(", "),
-                            layouts.current_idx
+                            layouts.current_idx,
+                            latin_index(&layouts.names)
                         ),
                     );
                     Some(layouts)
@@ -396,30 +320,11 @@ pub fn run() -> i32 {
         }
     };
 
-    match (pair, layouts) {
-        (Some(pair), Some(layouts)) => {
-            report_correspondence(&pair, &layouts.names, layouts.current_idx);
-        }
-        (Some(_), None) => println!("  layouts: correspondence skipped (no niri data)"),
-        (None, _) => println!("  layouts: correspondence skipped (no config)"),
+    if layouts.is_none() {
+        println!("  layouts: detail skipped (no niri data)");
     }
 
     exit_code(failed)
-}
-
-fn report_correspondence(pair: &LayoutPair, names: &[String], current: u8) {
-    for index in 0..=1u8 {
-        let configured = pair.get(index).expect("pair holds indices 0 and 1");
-        let actual = names.get(index as usize).cloned().unwrap_or_default();
-        println!("  index {index}: niri \"{actual}\" <-> config \"{configured}\"");
-    }
-    let findings = check_layouts(pair, names, current);
-    if findings.is_empty() {
-        println!("  layouts: count and active index sit inside the pair (order is positional)");
-    }
-    for finding in findings {
-        println!("  note: {finding}");
-    }
 }
 
 fn exit_code(failed: bool) -> i32 {
@@ -429,61 +334,6 @@ fn exit_code(failed: bool) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn names(list: &[&str]) -> Vec<String> {
-        list.iter().map(|name| name.to_string()).collect()
-    }
-
-    fn pair() -> LayoutPair {
-        LayoutPair::new("us", "ru").unwrap()
-    }
-
-    #[test]
-    fn matching_pair_has_no_findings() {
-        assert!(check_layouts(&pair(), &names(&["us", "ru"]), 0).is_empty());
-        assert!(check_layouts(&pair(), &names(&["us", "ru"]), 1).is_empty());
-    }
-
-    #[test]
-    fn descriptive_niri_names_are_not_a_finding() {
-        let findings = check_layouts(&pair(), &names(&["English (US)", "Russian"]), 1);
-        assert!(findings.is_empty(), "{findings:?}");
-    }
-
-    #[test]
-    fn count_mismatch_is_a_note_not_a_failure() {
-        let findings = check_layouts(&pair(), &names(&["us", "ru", "de"]), 0);
-        assert_eq!(
-            findings,
-            vec![LayoutFinding::CountMismatch {
-                actual: 3,
-                pair: pair(),
-            }]
-        );
-    }
-
-    #[test]
-    fn single_layout_is_just_a_count_note() {
-        let findings = check_layouts(&pair(), &names(&["us"]), 0);
-        assert_eq!(
-            findings,
-            vec![LayoutFinding::CountMismatch {
-                actual: 1,
-                pair: pair(),
-            }]
-        );
-    }
-
-    #[test]
-    fn current_third_language_is_reported() {
-        let findings = check_layouts(&pair(), &names(&["us", "ru", "de"]), 2);
-        assert!(findings.contains(&LayoutFinding::CurrentOutsidePair {
-            current: 2,
-            count: 3,
-            active: "de".to_string(),
-            pair: pair(),
-        }));
-    }
 
     #[test]
     fn rule_assessment() {
@@ -502,30 +352,6 @@ mod tests {
         assert!(probe_input_dir(&dir).is_empty());
         assert!(probe_input_dir(Path::new("/nonexistent-dir-for-tests")).is_empty());
         std::fs::remove_dir(&dir).ok();
-    }
-
-    #[test]
-    fn finding_messages_name_the_facts() {
-        let report = LayoutFinding::CurrentOutsidePair {
-            current: 2,
-            count: 3,
-            active: "de".to_string(),
-            pair: pair(),
-        }
-        .to_string();
-        assert!(report.contains('2'), "{report}");
-        assert!(report.contains("de"), "{report}");
-        assert!(report.contains("\"us\""), "{report}");
-        assert!(report.contains("\"ru\""), "{report}");
-        assert!(report.contains("third language"), "{report}");
-        let report = LayoutFinding::CountMismatch {
-            actual: 3,
-            pair: pair(),
-        }
-        .to_string();
-        assert!(report.contains('3'), "{report}");
-        assert!(report.contains("\"us\""), "{report}");
-        assert!(report.contains("\"ru\""), "{report}");
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -612,6 +438,37 @@ mod tests {
         let report = check.to_string();
         assert!(report.contains("STALE"), "{report}");
         assert!(report.contains("re-run `niri-punto setup`"), "{report}");
+    }
+
+    #[test]
+    fn unit_pick_prefers_the_user_install() {
+        let dir = scratch("unit-pick-user");
+        let user = dir.join("user.service");
+        let system = dir.join("system.service");
+        std::fs::write(&user, "[Service]\n").unwrap();
+        std::fs::write(&system, "[Service]\n").unwrap();
+        assert_eq!(pick_unit(Some(user.clone()), &[system]), Some(user));
+    }
+
+    #[test]
+    fn unit_pick_falls_back_to_the_system_unit() {
+        let dir = scratch("unit-pick-system");
+        let missing = dir.join("nowhere").join("user.service");
+        let first = dir.join("first.service");
+        let second = dir.join("second.service");
+        std::fs::write(&second, "[Service]\n").unwrap();
+        assert_eq!(
+            pick_unit(Some(missing), &[first, second.clone()]),
+            Some(second)
+        );
+    }
+
+    #[test]
+    fn unit_pick_is_none_without_any_unit() {
+        let dir = scratch("unit-pick-none");
+        let missing = dir.join("nowhere").join("user.service");
+        assert_eq!(pick_unit(Some(missing), &[]), None);
+        assert_eq!(pick_unit(None, &[]), None);
     }
 
     #[test]

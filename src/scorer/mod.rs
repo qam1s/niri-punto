@@ -1,17 +1,11 @@
-//! Content-based direction verdict for manual conversion.
-
 mod tables;
 
 use crate::buffer::BufferEntry;
-use crate::config::LayoutPair;
 
-/// Minimum average-log-prob gap per bigram for a confident verdict.
 pub const CONFIDENCE_MARGIN: f32 = 2.6;
 
-/// Inputs with fewer scorable characters decline.
 pub const MIN_LETTERS: usize = 3;
 
-/// Canonical scancode table: evdev scancode -> (US-side char, RU-side char).
 const SCANCODE_TABLE: &[(u16, char, char)] = &[
     (16, 'q', 'й'),
     (17, 'w', 'ц'),
@@ -93,7 +87,6 @@ fn score(text: &str, symbols: &str, table: &[f32], n: usize) -> Option<f32> {
     Some(sum / (seq.len() - 1) as f32)
 }
 
-/// Synthesize buffer entries from text for detector tests.
 #[cfg(test)]
 pub fn entries_from_text(text: &str) -> Vec<BufferEntry> {
     let mut out = Vec::new();
@@ -151,13 +144,50 @@ pub enum Intended {
 }
 
 impl Intended {
-    pub fn index_in(self, pair: &LayoutPair) -> u8 {
-        let latin = pair.latin_index();
+    pub fn index_in(self, latin: u8) -> u8 {
         match self {
             Self::Us => latin,
             Self::Ru => 1 - latin,
         }
     }
+}
+
+/// Which niri layout index renders latin script: the first name that is
+/// not a known cyrillic layout, or 0 when none matches.
+pub fn latin_index(names: &[String]) -> u8 {
+    names
+        .iter()
+        .position(|name| !is_cyrillic(name))
+        .unwrap_or(0) as u8
+}
+
+fn is_cyrillic(name: &str) -> bool {
+    name.to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| {
+            matches!(
+                word,
+                "ru" | "ua"
+                    | "by"
+                    | "bg"
+                    | "mk"
+                    | "rs"
+                    | "kz"
+                    | "kg"
+                    | "tj"
+                    | "mn"
+                    | "russian"
+                    | "ukrainian"
+                    | "belarusian"
+                    | "bulgarian"
+                    | "macedonian"
+                    | "serbian"
+                    | "kazakh"
+                    | "kyrgyz"
+                    | "tajik"
+                    | "mongolian"
+            )
+        })
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -166,7 +196,6 @@ pub enum Verdict {
     Decline,
 }
 
-/// Verdict the intended layout for buffer entries, or decline.
 pub fn verdict(entries: &[BufferEntry]) -> Verdict {
     let mut us_text = String::new();
     let mut ru_text = String::new();
@@ -269,14 +298,26 @@ mod tests {
     }
 
     #[test]
-    fn intended_index_follows_the_pair_order() {
-        use crate::config::LayoutPair;
-        let usual = LayoutPair::new("us", "ru").unwrap();
-        assert_eq!(Intended::Us.index_in(&usual), 0);
-        assert_eq!(Intended::Ru.index_in(&usual), 1);
-        let swapped = LayoutPair::new("ru", "us").unwrap();
-        assert_eq!(Intended::Us.index_in(&swapped), 1);
-        assert_eq!(Intended::Ru.index_in(&swapped), 0);
+    fn intended_index_follows_the_latin_position() {
+        assert_eq!(Intended::Us.index_in(0), 0);
+        assert_eq!(Intended::Ru.index_in(0), 1);
+        assert_eq!(Intended::Us.index_in(1), 1);
+        assert_eq!(Intended::Ru.index_in(1), 0);
+    }
+
+    #[test]
+    fn latin_index_names_the_non_cyrillic_position() {
+        fn names(list: &[&str]) -> Vec<String> {
+            list.iter().map(|name| name.to_string()).collect()
+        }
+        assert_eq!(latin_index(&names(&["us", "ru"])), 0);
+        assert_eq!(latin_index(&names(&["ru", "us"])), 1);
+        assert_eq!(latin_index(&names(&["English (US)", "Russian"])), 0);
+        assert_eq!(latin_index(&names(&["Russian", "English (US)"])), 1);
+        assert_eq!(latin_index(&names(&["ru+phonetic", "us"])), 1);
+        assert_eq!(latin_index(&names(&["de", "fr"])), 0);
+        assert_eq!(latin_index(&names(&["ru", "ua"])), 0);
+        assert_eq!(latin_index(&[]), 0);
     }
 
     #[test]
@@ -319,23 +360,23 @@ mod tests {
     fn ru_weak_declines() {
         assert_verdict(
             &[
-                "aeyrwbz",      // функция
-                "jib,rf",       // ошибка
-                "zpsr",         // язык
-                "vsim",         // мышь
-                "hfcrkflrf",    // раскладка
-                "gthtrk.xtybt", // переключение
-                "cjj,otybt",    // сообщение
+                "aeyrwbz",
+                "jib,rf",
+                "zpsr",
+                "vsim",
+                "hfcrkflrf",
+                "gthtrk.xtybt",
+                "cjj,otybt",
                 "Xtkjdtr dbltk rybue",
                 "Cgfcb,j pf ,jkmie. ghj,ktem",
-                "Rfr ltkf", // Как дела
+                "Rfr ltkf",
                 "Dbltk rybue",
-                "ynt",   // нет
-                "jr",    // ок
-                "lf",    // да
-                "ltym",  // день
-                "[kt,",  // хлеб
-                "rjirf", // кошка
+                "ynt",
+                "jr",
+                "lf",
+                "ltym",
+                "[kt,",
+                "rjirf",
             ],
             Verdict::Decline,
         );

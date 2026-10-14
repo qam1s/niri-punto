@@ -20,7 +20,17 @@ keyboard keeps working.
 ## Install
 
 ```sh
-cargo install niri-punto --locked && ~/.cargo/bin/niri-punto setup
+cargo install niri-punto && niri-punto setup
+```
+
+Or in your Nix flake:
+
+```nix
+{
+  inputs.niri-punto.url = "github:qam1s/niri-punto";
+  ...
+  modules = [inputs.niri-punto.nixosModules.default];
+}
 ```
 
 ## Usage
@@ -31,28 +41,6 @@ cargo install niri-punto --locked && ~/.cargo/bin/niri-punto setup
 | Mod + Shift    | phrase | Convert phrase                                               |
 | Double Shift   | phrase | Convert phrase                                               |
 | Repeat gesture | undo   | Undo previous conversion                                     |
-
-## Config
-
-`~/.config/niri-punto/config.kdl` (`$XDG_CONFIG_HOME` respected when set).
-
-```kdl
-layout "us" "ru"
-
-binds {
-    Mod word
-    Mod+Shift phrase
-    Double-Shift phrase
-}
-
-timings {
-    double-shift-ms 400
-    undo-ms 3000
-    debounce-ms 30
-    pending-ms 2000
-    tap-ms 300
-}
-```
 
 ## License
 

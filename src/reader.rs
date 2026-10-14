@@ -1,5 +1,3 @@
-//! evdev reader: keyboard devices, hotplug, and dry-run dispatch.
-
 use crate::buffer::BufferEntry;
 use crate::trigger::Key;
 use evdev::{Device, EventType, KeyCode};
@@ -9,13 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
-/// Name of the daemon's own virtual device.
 pub const OWN_DEVICE_NAME: &str = "niri-punto";
 
-/// How often the device directory is rescanned for hotplug changes.
 pub const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 
-/// A raw key transition from one hardware device.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct RawKey {
     pub scancode: u16,
@@ -27,7 +22,6 @@ enum DeviceMsg {
     Disconnected(PathBuf),
 }
 
-/// Map a scancode to the trigger key space.
 pub fn classify(scancode: u16) -> Key {
     if scancode == KeyCode::KEY_LEFTSHIFT.code() {
         Key::ShiftLeft
@@ -115,51 +109,6 @@ pub fn is_copy_key(scancode: u16) -> bool {
     scancode == KeyCode::KEY_C.code() || scancode == KeyCode::KEY_INSERT.code()
 }
 
-/// Key name to scancode for `chord` combos.
-pub fn scancode_by_name(name: &str) -> Option<u16> {
-    let code = match name {
-        "a" => KeyCode::KEY_A,
-        "b" => KeyCode::KEY_B,
-        "c" => KeyCode::KEY_C,
-        "d" => KeyCode::KEY_D,
-        "e" => KeyCode::KEY_E,
-        "f" => KeyCode::KEY_F,
-        "g" => KeyCode::KEY_G,
-        "h" => KeyCode::KEY_H,
-        "i" => KeyCode::KEY_I,
-        "j" => KeyCode::KEY_J,
-        "k" => KeyCode::KEY_K,
-        "l" => KeyCode::KEY_L,
-        "m" => KeyCode::KEY_M,
-        "n" => KeyCode::KEY_N,
-        "o" => KeyCode::KEY_O,
-        "p" => KeyCode::KEY_P,
-        "q" => KeyCode::KEY_Q,
-        "r" => KeyCode::KEY_R,
-        "s" => KeyCode::KEY_S,
-        "t" => KeyCode::KEY_T,
-        "u" => KeyCode::KEY_U,
-        "v" => KeyCode::KEY_V,
-        "w" => KeyCode::KEY_W,
-        "x" => KeyCode::KEY_X,
-        "y" => KeyCode::KEY_Y,
-        "z" => KeyCode::KEY_Z,
-        "0" => KeyCode::KEY_0,
-        "1" => KeyCode::KEY_1,
-        "2" => KeyCode::KEY_2,
-        "3" => KeyCode::KEY_3,
-        "4" => KeyCode::KEY_4,
-        "5" => KeyCode::KEY_5,
-        "6" => KeyCode::KEY_6,
-        "7" => KeyCode::KEY_7,
-        "8" => KeyCode::KEY_8,
-        "9" => KeyCode::KEY_9,
-        _ => return None,
-    };
-    Some(code.code())
-}
-
-/// Both side scancodes of a modifier key name.
 pub fn modifier_scancodes(name: &str) -> Option<(u16, u16)> {
     let (left, right) = match name {
         "mod" => (KeyCode::KEY_LEFTMETA, KeyCode::KEY_RIGHTMETA),
@@ -174,7 +123,6 @@ pub fn should_skip_device(name: Option<&str>) -> bool {
     name == Some(OWN_DEVICE_NAME)
 }
 
-/// A key press worth remembering: press or autorepeat of a non-modifier.
 pub fn is_typing_key(key: Key, value: i32) -> bool {
     key == Key::Other && (value == 1 || value == 2)
 }
@@ -186,7 +134,6 @@ pub fn buffer_entry_for(scancode: u16, shift_held: bool) -> BufferEntry {
     }
 }
 
-/// Candidate device nodes: `/dev/input/event*` entries that exist now.
 fn candidate_nodes(input_dir: &Path) -> Vec<PathBuf> {
     let mut nodes = Vec::new();
     let Ok(dir) = std::fs::read_dir(input_dir) else {
@@ -243,7 +190,6 @@ fn device_thread(path: PathBuf, tx: Sender<DeviceMsg>) {
     let _ = tx.send(DeviceMsg::Disconnected(path));
 }
 
-/// Blocking hotplug reader.
 pub struct Reader {
     tx: Sender<DeviceMsg>,
     rx: Receiver<DeviceMsg>,
@@ -251,7 +197,6 @@ pub struct Reader {
     last_rescan: Instant,
 }
 
-/// One short-poll outcome.
 pub enum Poll {
     Key(RawKey),
     Idle,
@@ -272,7 +217,6 @@ impl Reader {
         reader
     }
 
-    /// Wait up to `timeout` for one key transition.
     pub fn poll(&mut self, input_dir: &Path, timeout: Duration) -> Poll {
         match self.rx.recv_timeout(timeout) {
             Ok(DeviceMsg::Key(key)) => Poll::Key(key),
@@ -319,7 +263,6 @@ impl Reader {
         }
     }
 
-    /// Devices currently (believed) open.
     pub fn live_devices(&self) -> &HashSet<PathBuf> {
         &self.live
     }
@@ -431,18 +374,6 @@ mod tests {
         );
         assert_eq!(modifier_scancodes("alt"), None);
         assert_eq!(modifier_scancodes("l"), None);
-    }
-
-    #[test]
-    fn key_names_map_to_scancodes() {
-        assert_eq!(scancode_by_name("a"), Some(KeyCode::KEY_A.code()));
-        assert_eq!(scancode_by_name("l"), Some(KeyCode::KEY_L.code()));
-        assert_eq!(scancode_by_name("z"), Some(KeyCode::KEY_Z.code()));
-        assert_eq!(scancode_by_name("0"), Some(KeyCode::KEY_0.code()));
-        assert_eq!(scancode_by_name("9"), Some(KeyCode::KEY_9.code()));
-        assert_eq!(scancode_by_name("L"), None);
-        assert_eq!(scancode_by_name("space"), None);
-        assert_eq!(scancode_by_name(""), None);
     }
 
     #[test]

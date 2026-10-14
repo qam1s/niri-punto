@@ -1,15 +1,8 @@
-//! Double Shift trigger state machine.
-
-/// Maximum gap between the two Shift presses of one trigger.
 pub const DOUBLE_SHIFT_WINDOW_MS: u64 = 400;
-/// A repeated gesture inside this window after a previous one means undo.
 pub const UNDO_WINDOW_MS: u64 = 3000;
-/// Presses faster than this after a release are switch bounce, not intent.
 pub const DEBOUNCE_MS: u64 = 30;
-/// A lone Mod press released within this window is a tap gesture.
 pub const TAP_WINDOW_MS: u64 = 300;
 
-/// All trigger timing knobs in one place.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct TimingConfig {
     pub double_shift_ms: u64,
@@ -31,7 +24,6 @@ impl Default for TimingConfig {
     }
 }
 
-/// Keys the machine cares about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Key {
     ShiftLeft,
@@ -46,7 +38,6 @@ pub enum Key {
     Other,
 }
 
-/// Modifier set of a daemon-side bind, in niri spelling (`Mod` is Super).
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct ModSet {
     pub meta: bool,
@@ -54,13 +45,6 @@ pub struct ModSet {
     pub ctrl: bool,
 }
 
-impl ModSet {
-    pub fn any(self) -> bool {
-        self.meta || self.shift || self.ctrl
-    }
-}
-
-/// A daemon-side bind from the config `binds` block.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Bind {
     pub mods: ModSet,
@@ -68,24 +52,20 @@ pub struct Bind {
     pub kind: GestureKind,
 }
 
-/// Which conversion scope a trigger asks for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum GestureKind {
     Word,
     Phrase,
 }
 
-/// A recognized trigger.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Gesture {
     pub kind: GestureKind,
     pub undo: bool,
 }
 
-/// How long a recognized gesture waits for a modifier-free moment.
 pub const PENDING_TIMEOUT_MS: u64 = 2000;
 
-/// A gesture waiting for a modifier-free moment to run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PendingGesture {
     pub kind: GestureKind,
@@ -128,7 +108,6 @@ impl Side {
     }
 }
 
-/// Recognizes Double Shift gestures and lone Mod taps.
 pub struct TriggerMachine {
     shift_down: [bool; 2],
     ctrl_down: [bool; 2],
@@ -797,8 +776,6 @@ mod tests {
         );
     }
 
-    /// Mod+Shift chord (Mod first): Shift press with Mod held is Phrase,
-    /// converting on Mod release via the pending slot.
     #[test]
     fn mod_shift_press_is_phrase() {
         let mut m = TriggerMachine::new();

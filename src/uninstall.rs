@@ -1,5 +1,3 @@
-//! `uninstall`: remove what `setup` installed, keep the config.
-
 use crate::doctor;
 use crate::setup::{self, Command, Options, Paths, Runner};
 use std::io;
@@ -12,7 +10,6 @@ fn cmd(prog: &str, args: &[&str]) -> Command {
     }
 }
 
-/// Stop + disable the user unit, then forget it after the file is gone.
 pub fn user_stop() -> Command {
     cmd(
         "systemctl",
@@ -20,12 +17,10 @@ pub fn user_stop() -> Command {
     )
 }
 
-/// Reload after the unit file is removed.
 pub fn user_reload() -> Command {
     cmd("systemctl", &["--user", "daemon-reload"])
 }
 
-/// The escalated cleanup of root-owned files.
 pub fn udev_commands() -> Vec<Command> {
     vec![
         cmd("sudo", &["rm", "-f", doctor::RULE_DEST]),
@@ -45,28 +40,23 @@ pub fn udev_commands() -> Vec<Command> {
     ]
 }
 
-/// Package name: the cargo-owned copy, if any.
 pub const PACKAGE_NAME: &str = "niri-punto";
 
-/// Cargo home of the uninstalling user.
 pub fn cargo_home() -> Option<PathBuf> {
     std::env::var_os("CARGO_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cargo")))
 }
 
-/// The cargo-installed copy, if present.
 pub fn cargo_copy() -> Option<PathBuf> {
     let copy = cargo_home()?.join("bin").join(PACKAGE_NAME);
     copy.is_file().then_some(copy)
 }
 
-/// Remove the cargo-owned copy through cargo itself.
 pub fn cargo_command() -> Command {
     cmd("cargo", &["uninstall", PACKAGE_NAME])
 }
 
-/// Manual fallback printed with `--no-udev`.
 pub fn manual_udev_command() -> String {
     udev_commands()
         .iter()
@@ -105,7 +95,6 @@ fn exec(runner: &dyn Runner, dry_run: bool, command: &Command) -> io::Result<()>
     runner.run(command)
 }
 
-/// Run the uninstall. Returns the process exit code.
 pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
     let packaged = setup::is_packaged(&paths.exe);
     if packaged {
@@ -136,7 +125,6 @@ pub fn run(options: Options, paths: &Paths, runner: &dyn Runner) -> i32 {
         return 1;
     }
 
-    println!("config: kept {}", paths.config_path.display());
     if packaged {
         println!("udev rule: owned by the package, skipped");
     } else if options.no_udev {
@@ -208,8 +196,6 @@ mod tests {
         std::fs::copy(&exe, paths.bin_dir.join("niri-punto")).unwrap();
         std::fs::create_dir_all(paths.unit_path.parent().unwrap()).unwrap();
         std::fs::write(&paths.unit_path, "[Unit]\n").unwrap();
-        std::fs::create_dir_all(paths.config_path.parent().unwrap()).unwrap();
-        std::fs::write(&paths.config_path, "layout \"us\" \"ru\"\n").unwrap();
         paths.exe = paths.bin_dir.join("niri-punto");
         (root, paths)
     }
@@ -222,7 +208,6 @@ mod tests {
         assert_eq!(run(Options::default(), &paths, &runner), 0);
         assert!(!paths.bin_dir.join("niri-punto").exists());
         assert!(!paths.unit_path.exists());
-        assert!(paths.config_path.exists());
         let commands = runner.commands.borrow();
         assert_eq!(commands.len(), 7);
         assert_eq!(commands[0].prog, "systemctl");

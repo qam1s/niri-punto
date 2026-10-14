@@ -1,7 +1,4 @@
-//! niri-punto: keyboard layout corrector daemon for the niri compositor.
-
 mod buffer;
-mod config;
 mod control;
 mod convert;
 mod detector;
@@ -25,22 +22,21 @@ use detector::{BigramDetector, Detector};
 use inject::{Emitter, Injector};
 use ipc::{IpcClient, LayoutBackend};
 use reader::Reader;
-use scorer::Verdict;
+use scorer::{Verdict, latin_index};
 use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use trigger::{Gesture, GestureKind, Key, PendingGesture, TriggerMachine};
+use trigger::{
+    Bind, Gesture, GestureKind, Key, ModSet, PendingGesture, TimingConfig, TriggerMachine,
+};
 
-/// How often the main loop wakes to serve control-socket bind requests.
 const CONTROL_POLL: Duration = Duration::from_millis(100);
 
 fn usage() -> ! {
     eprintln!("usage: niri-punto <command> [options]");
-    eprintln!("  run [--input-dir DIR] [--config PATH]  start the daemon (single instance)");
+    eprintln!("  run [--input-dir DIR]  start the daemon (single instance)");
     eprintln!("  convert-word           ask the running daemon to convert the last word");
-    eprintln!(
-        "  setup [--no-udev] [--dry-run]  register this binary, install unit, config, udev rule"
-    );
+    eprintln!("  setup [--no-udev] [--dry-run]  register this binary, install unit, udev rule");
     eprintln!("  uninstall [--no-udev] [--dry-run]  remove binary, unit, udev rule, cargo copy");
     eprintln!("  update [--dry-run]              install the released crates.io build and restart");
     eprintln!("  update-dev [--dry-run]          install the freshest main build and restart");
@@ -50,7 +46,6 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
-/// Print the version baked in at build time and exit.
 fn version() -> ! {
     println!("niri-punto {}", env!("CARGO_PKG_VERSION"));
     std::process::exit(0);
@@ -82,7 +77,7 @@ fn apply_plan(
 /// When the target is already active the barrier passes without waiting:
 /// niri emits no event for staying put.
 fn wait_for_barrier(ipc: &mut impl LayoutBackend, target: u8) -> bool {
-    if let Ok((current, _)) = ipc.current_layout() {
+    if let Ok((current, _, _)) = ipc.current_layout() {
         if current == target {
             return true;
         }
@@ -115,13 +110,18 @@ fn do_convert(
     ipc: &mut impl LayoutBackend,
     injector: &mut impl Emitter,
 ) -> Result<String, String> {
-    let (current, count) = ipc
+    let (current, count, names) = ipc
         .current_layout()
         .map_err(|error| format!("layout read failed: {error}"))?;
     let plan = match detector.verdict(phrase) {
-        Verdict::Intended(intended) => {
-            converter.convert_toward(entries, intended, current, count, birth)
-        }
+        Verdict::Intended(intended) => converter.convert_toward(
+            entries,
+            intended,
+            latin_index(&names),
+            current,
+            count,
+            birth,
+        ),
         Verdict::Decline => converter.convert(entries, current, count),
     }
     .map_err(|error| format!("skipped ({error})"))?;
@@ -152,7 +152,7 @@ fn do_undo(
 fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let (command, rest) = match raw.first().map(String::as_str) {
-        None | Some("--input-dir") | Some("--config") => ("run", raw.as_slice()),
+        None | Some("--input-dir") => ("run", raw.as_slice()),
         Some("--version") | Some("-V") => version(),
         Some("run") | Some("convert-word") | Some("setup") | Some("uninstall") | Some("update")
         | Some("update-dev") | Some("doctor") | Some("version") => (raw[0].as_str(), &raw[1..]),
@@ -243,21 +243,16 @@ fn main() {
         }
         "run" => {
             let mut input_dir = PathBuf::from("/dev/input");
-            let mut config_override: Option<PathBuf> = None;
             let mut rest = rest.iter();
             while let Some(arg) = rest.next() {
                 match arg.as_str() {
                     "--input-dir" => {
                         input_dir = rest.next().map(PathBuf::from).unwrap_or_else(|| usage());
                     }
-                    "--config" => {
-                        config_override =
-                            Some(rest.next().map(PathBuf::from).unwrap_or_else(|| usage()));
-                    }
                     _ => usage(),
                 }
             }
-            run(input_dir, config_override);
+            run(input_dir);
         }
         "convert-word" => {
             if !rest.is_empty() {
@@ -286,7 +281,7 @@ fn client(kind: ControlKind) {
     }
 }
 
-fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
+fn run(input_dir: PathBuf) {
     eprintln!("niri-punto {}", env!("CARGO_PKG_VERSION"));
     let socket_path = control::socket_path();
     let listener = match control::bind(&socket_path) {
@@ -315,41 +310,6 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
         eprintln!("control: listener thread failed; binds will not work");
     }
 
-    let pair = match &config_override {
-        Some(path) => config::load_from(path),
-        None => {
-            match config::ensure_default() {
-                Ok(true) => eprintln!("config: wrote default {}", config::config_path().display()),
-                Ok(false) => {}
-                Err(error) => {
-                    eprintln!("config: cannot write default: {error}");
-                    std::process::exit(1);
-                }
-            }
-            config::load()
-        }
-    };
-    let pair = match pair {
-        Ok(pair) => pair,
-        Err(error) => {
-            eprintln!("config: {error}");
-            eprintln!("hint: run `niri-punto setup` to write the default config");
-            std::process::exit(1);
-        }
-    };
-    let settings = match &config_override {
-        Some(path) => config::load_settings_from(path),
-        None => config::load_settings(),
-    };
-    let settings = match settings {
-        Ok(settings) => settings,
-        Err(error) => {
-            eprintln!("config: {error}");
-            eprintln!("hint: run `niri-punto setup` to write the default config");
-            std::process::exit(1);
-        }
-    };
-
     let mut injector = match Injector::open() {
         Ok(injector) => injector,
         Err(error) => {
@@ -377,12 +337,29 @@ fn run(input_dir: PathBuf, config_override: Option<PathBuf>) {
 
     let start = Instant::now();
     let mut triggers = TriggerMachine::new();
-    triggers.set_tap_action(settings.tap_action);
-    triggers.set_binds(settings.binds);
-    triggers.set_pair_base(settings.pair_base);
-    triggers.set_timing(settings.timing);
+    triggers.set_tap_action(Some(GestureKind::Word));
+    triggers.set_timing(TimingConfig::default());
+    let (shift_left, shift_right) =
+        reader::modifier_scancodes("shift").expect("shift has left and right sides");
+    let mods = ModSet {
+        meta: true,
+        ..ModSet::default()
+    };
+    triggers.set_binds(vec![
+        Bind {
+            mods,
+            scancode: shift_left,
+            kind: GestureKind::Phrase,
+        },
+        Bind {
+            mods,
+            scancode: shift_right,
+            kind: GestureKind::Phrase,
+        },
+    ]);
+    triggers.set_pair_base(GestureKind::Phrase);
     let mut buffer = InputBuffer::default();
-    let mut converter = Converter::new(pair);
+    let mut converter = Converter::new();
     let mut pending: Option<PendingGesture> = None;
     let detector = BigramDetector;
     let mut last_focus: Option<Option<u64>> = None;
@@ -591,7 +568,7 @@ fn handle_key_at(
             }
         } else {
             if buffer.birth_layout().is_none() {
-                if let Ok((current, _)) = ipc.current_layout() {
+                if let Ok((current, _, _)) = ipc.current_layout() {
                     buffer.note_birth(current);
                 }
             }
@@ -644,7 +621,7 @@ fn handle_key_at(
             }
             if staged.tap && buffer.trailing_word(reader::is_word_boundary).is_empty() {
                 match ipc.current_layout() {
-                    Ok((current, _)) => {
+                    Ok((current, _, _)) => {
                         let target = if current == 0 { 1 } else { 0 };
                         match ipc.switch_to(target) {
                             Ok(()) => eprintln!("tap: no text, switched to layout {target}"),
@@ -710,7 +687,6 @@ fn handle_key_at(
 mod tests {
     use super::*;
     use crate::buffer::BufferEntry;
-    use crate::config::LayoutPair;
     use crate::detector::ManualOnly;
     use crate::trigger::{Bind, ModSet};
     use evdev::KeyCode;
@@ -737,6 +713,7 @@ mod tests {
     struct FakeLayouts {
         current: u8,
         count: usize,
+        names: Vec<String>,
         switches: Vec<u8>,
         wait_calls: usize,
         stream_dead: bool,
@@ -745,8 +722,8 @@ mod tests {
     }
 
     impl LayoutBackend for FakeLayouts {
-        fn current_layout(&mut self) -> io::Result<(u8, usize)> {
-            Ok((self.current, self.count))
+        fn current_layout(&mut self) -> io::Result<(u8, usize, Vec<String>)> {
+            Ok((self.current, self.count, self.names.clone()))
         }
 
         fn switch_to(&mut self, index: u8) -> io::Result<()> {
@@ -816,19 +793,19 @@ mod tests {
         }
 
         fn with_detector(detector: Box<dyn Detector>) -> Self {
-            let pair = LayoutPair::new("us", "ru").unwrap();
-            Self::with_detector_and_pair(detector, pair)
+            Self::with_detector_and_names(detector, &["us", "ru"])
         }
 
-        fn with_detector_and_pair(detector: Box<dyn Detector>, pair: LayoutPair) -> Self {
+        fn with_detector_and_names(detector: Box<dyn Detector>, names: &[&str]) -> Self {
             Self {
                 triggers: TriggerMachine::new(),
                 buffer: InputBuffer::default(),
-                converter: Converter::new(pair),
+                converter: Converter::new(),
                 detector,
                 ipc: FakeLayouts {
                     current: 0,
                     count: 2,
+                    names: names.iter().map(|name| name.to_string()).collect(),
                     switches: Vec::new(),
                     wait_calls: 0,
                     stream_dead: false,
@@ -1190,8 +1167,7 @@ mod tests {
 
     #[test]
     fn swapped_pair_diverged_word_converts_toward_the_ru_position() {
-        let pair = LayoutPair::new("ru", "us").unwrap();
-        let mut h = Harness::with_detector_and_pair(Box::new(BigramDetector), pair);
+        let mut h = Harness::with_detector_and_names(Box::new(BigramDetector), &["ru", "us"]);
         h.type_codes(T, &GHBTDN);
         h.ipc.current = 1;
         h.double_shift(T + 500);
