@@ -394,4 +394,155 @@ mod tests {
         assert_eq!(run(Options::default(), &paths, &FailingRunner), 1);
         assert!(!paths.unit_path.exists());
     }
+
+    #[test]
+    fn missing_cargo_reports_the_toolchain_hint() {
+        struct MissingCargo;
+        impl Runner for MissingCargo {
+            fn run(&self, command: &Command) -> io::Result<()> {
+                if command.prog == "cargo" {
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "no cargo"));
+                }
+                Ok(())
+            }
+        }
+        let (_root, paths) = installed_paths("update-cargo-missing");
+        let _env = CargoHomeGuard::empty("update-cargo-missing-home");
+        assert_eq!(run(Options::default(), &paths, &MissingCargo), 1);
+    }
+
+    struct FailAfterInstall {
+        fail_arg: &'static str,
+    }
+
+    impl Runner for FailAfterInstall {
+        fn run(&self, command: &Command) -> io::Result<()> {
+            if command.prog == "systemctl" && command.args.iter().any(|arg| arg == self.fail_arg) {
+                return Err(io::Error::other("service broke"));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn failing_reload_exits_nonzero() {
+        let (_root, paths) = installed_paths("update-reload-fail");
+        let _env = CargoHomeGuard::empty("update-reload-fail-home");
+        let runner = FailAfterInstall {
+            fail_arg: "daemon-reload",
+        };
+        assert_eq!(run(Options::default(), &paths, &runner), 1);
+    }
+
+    #[test]
+    fn failing_restart_exits_nonzero() {
+        let (_root, paths) = installed_paths("update-restart-fail");
+        let _env = CargoHomeGuard::empty("update-restart-fail-home");
+        let runner = FailAfterInstall {
+            fail_arg: "restart",
+        };
+        assert_eq!(run(Options::default(), &paths, &runner), 1);
+    }
+
+    #[test]
+    fn installed_rev_rejects_short_and_dirty_values() {
+        let cargo = scratch("update-rev-short-home");
+        crates_json(&cargo, &format!("niri-punto 0.3.8 (git+{REPO}#abc123)"));
+        {
+            let _env = CargoHomeGuard::point_at(&cargo);
+            assert_eq!(installed_dev_rev(), None);
+        }
+        let cargo = scratch("update-rev-nonhex-home");
+        crates_json(
+            &cargo,
+            &format!(
+                "niri-punto 0.3.8 (git+{REPO}#{})",
+                "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+            ),
+        );
+        {
+            let _env = CargoHomeGuard::point_at(&cargo);
+            assert_eq!(installed_dev_rev(), None);
+        }
+    }
+
+    #[test]
+    fn remote_rev_rejects_short_and_dirty_values() {
+        let runner = FakeRunner::with_remote("abc123");
+        assert_eq!(remote_main_rev(&runner), None);
+        let runner = FakeRunner::with_remote("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz");
+        assert_eq!(remote_main_rev(&runner), None);
+        struct EmptyRunner;
+        impl Runner for EmptyRunner {
+            fn run(&self, _command: &Command) -> io::Result<()> {
+                Ok(())
+            }
+            fn capture(&self, _command: &Command) -> io::Result<String> {
+                Ok("".to_string())
+            }
+        }
+        assert_eq!(remote_main_rev(&EmptyRunner), None);
+    }
+
+    #[test]
+    fn ls_remote_command_names_main() {
+        assert_eq!(
+            ls_remote_main_command().to_string(),
+            format!("git ls-remote {REPO} refs/heads/main")
+        );
+    }
+
+    #[test]
+    fn dev_dry_run_skips_rev_check_and_writes_nothing() {
+        let (_root, paths) = installed_paths("update-dev-dry");
+        let _env = CargoHomeGuard::empty("update-dev-dry-home");
+        let runner = FakeRunner::with_remote(REV);
+        let options = Options {
+            dry_run: true,
+            ..Default::default()
+        };
+        assert_eq!(run_dev(options, &paths, &runner), 0);
+        assert!(runner.commands.borrow().is_empty());
+        assert!(!paths.unit_path.exists());
+    }
+
+    #[test]
+    fn cargo_home_falls_back_to_home_dir() {
+        let _env = crate::test_env::lock();
+        let prior_cargo = std::env::var_os("CARGO_HOME");
+        let prior_home = std::env::var_os("HOME");
+        unsafe {
+            std::env::set_var("CARGO_HOME", "/tmp/niri-punto-update-cargo");
+            std::env::set_var("HOME", "/tmp/niri-punto-update-home");
+        }
+        assert_eq!(
+            cargo_home(),
+            Some(PathBuf::from("/tmp/niri-punto-update-cargo"))
+        );
+        unsafe {
+            std::env::remove_var("CARGO_HOME");
+        }
+        assert_eq!(
+            cargo_home(),
+            Some(PathBuf::from("/tmp/niri-punto-update-home/.cargo"))
+        );
+        crate::test_env::restore("CARGO_HOME", prior_cargo);
+        crate::test_env::restore("HOME", prior_home);
+    }
+
+    #[test]
+    fn failing_unit_repoint_exits_nonzero() {
+        let root = scratch("update-unit-fail");
+        let blocker = root.join("blocker");
+        std::fs::write(&blocker, b"in the way").unwrap();
+        let home = root.join("home");
+        let exe = root.join("niri-punto");
+        std::fs::write(&exe, b"fake-binary").unwrap();
+        let mut paths = setup::paths_for(&home, Some(root.join("xcfg").to_str().unwrap()), exe);
+        paths.unit_path = blocker.join("sub").join("niri-punto.service");
+        let _env = CargoHomeGuard::empty("update-unit-fail-home");
+        let runner = FakeRunner::new();
+        assert_eq!(run(Options::default(), &paths, &runner), 1);
+        assert_eq!(runner.commands.borrow().len(), 1);
+    }
 }
