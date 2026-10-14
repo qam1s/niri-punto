@@ -222,16 +222,23 @@ fn line(key: &str, value: impl fmt::Display) {
 }
 
 pub fn run() -> i32 {
+    run_in(Path::new(INPUT_DIR))
+}
+
+pub fn run_in(input_dir: &Path) -> i32 {
     let mut failed = false;
 
-    let probes = probe_input_dir(Path::new(INPUT_DIR));
+    let probes = probe_input_dir(input_dir);
     let readable = probes
         .iter()
         .filter(|probe| probe.readable_keyboard)
         .count();
     if probes.is_empty() {
         failed = true;
-        line("devices", format!("{INPUT_DIR}: no event nodes found"));
+        line(
+            "devices",
+            format!("{}: no event nodes found", input_dir.display()),
+        );
     } else {
         line(
             "devices",
@@ -481,6 +488,11 @@ mod tests {
             check_unit_exec(Some("[Service]\nRestart=on-failure\n")),
             UnitCheck::NoExecStart
         );
+        assert!(
+            check_unit_exec(Some("[Service]\nRestart=on-failure\n"))
+                .to_string()
+                .contains("no ExecStart")
+        );
 
         let dir = scratch("unit-ok");
         let exe = dir.join("niri-punto");
@@ -494,5 +506,249 @@ mod tests {
             check_unit_exec(Some(&unit)),
             UnitCheck::Ok { exe: exe.clone() }
         );
+        assert!(
+            check_unit_exec(Some(&unit))
+                .to_string()
+                .contains(&exe.display().to_string())
+        );
+    }
+
+    #[test]
+    fn rule_display_names_each_state() {
+        assert_eq!(RuleCheck::Ok.to_string(), "ok (uaccess rule installed)");
+        assert!(RuleCheck::Missing.to_string().contains("MISSING"));
+        assert!(RuleCheck::Missing.to_string().contains("niri-punto setup"));
+        assert!(RuleCheck::NoUaccess.to_string().contains("no uaccess tag"));
+    }
+
+    #[test]
+    fn unit_display_names_each_state() {
+        let exe = PathBuf::from("/opt/niri-punto/niri-punto");
+        assert!(
+            UnitCheck::Ok { exe: exe.clone() }
+                .to_string()
+                .contains("/opt/niri-punto/niri-punto")
+        );
+        assert!(UnitCheck::Missing.to_string().contains("MISSING"));
+        assert!(UnitCheck::NoExecStart.to_string().contains("no ExecStart"));
+        assert!(UnitCheck::Stale { exe }.to_string().contains("STALE"));
+    }
+
+    #[test]
+    fn uinput_display_names_each_state() {
+        assert_eq!(UinputCheck::Ok.to_string(), "ok (driver loaded, readable)");
+        assert!(UinputCheck::Missing.to_string().contains("MISSING"));
+        assert!(
+            UinputCheck::NotUsable {
+                driver_loaded: true
+            }
+            .to_string()
+            .contains("not readable")
+        );
+    }
+
+    #[test]
+    fn unit_exec_target_handles_quoted_paths() {
+        assert_eq!(
+            unit_exec_target("ExecStart=\"/opt/niri-punto/niri-punto\" --flag\n"),
+            Some(PathBuf::from("/opt/niri-punto/niri-punto"))
+        );
+        assert_eq!(unit_exec_target("ExecStart=\"\"\n"), None);
+        assert_eq!(
+            unit_exec_target("  ExecStart=/bin/niri-punto\n"),
+            Some(PathBuf::from("/bin/niri-punto"))
+        );
+    }
+
+    #[test]
+    fn read_unit_at_roundtrips_files_and_missing() {
+        let dir = scratch("doctor-read-unit");
+        let path = dir.join("niri-punto.service");
+        assert_eq!(read_unit_at(&path), None);
+        std::fs::write(&path, "[Service]\n").unwrap();
+        assert_eq!(read_unit_at(&path).as_deref(), Some("[Service]\n"));
+    }
+
+    #[test]
+    fn unit_path_follows_xdg_and_home() {
+        let _env = crate::test_env::lock();
+        let prior_home = std::env::var_os("HOME");
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        unsafe {
+            std::env::set_var("HOME", "/tmp/niri-punto-doctor-home");
+            std::env::set_var("XDG_CONFIG_HOME", "/tmp/niri-punto-doctor-xdg");
+        }
+        assert_eq!(
+            unit_path(),
+            Some(PathBuf::from(
+                "/tmp/niri-punto-doctor-xdg/systemd/user/niri-punto.service"
+            ))
+        );
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", "");
+        }
+        assert_eq!(
+            unit_path(),
+            Some(PathBuf::from(
+                "/tmp/niri-punto-doctor-home/.config/systemd/user/niri-punto.service"
+            ))
+        );
+        unsafe {
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        assert_eq!(
+            unit_path(),
+            Some(PathBuf::from(
+                "/tmp/niri-punto-doctor-home/.config/systemd/user/niri-punto.service"
+            ))
+        );
+        unsafe {
+            std::env::remove_var("HOME");
+        }
+        assert_eq!(unit_path(), None);
+        crate::test_env::restore("HOME", prior_home);
+        crate::test_env::restore("XDG_CONFIG_HOME", prior_xdg);
+    }
+
+    #[test]
+    fn locate_unit_finds_user_before_system() {
+        let _env = crate::test_env::lock();
+        let prior_home = std::env::var_os("HOME");
+        let dir = scratch("doctor-locate-unit");
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        assert_eq!(locate_unit(), None);
+        let unit = unit_path().unwrap();
+        std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        std::fs::write(&unit, "[Service]\n").unwrap();
+        assert_eq!(locate_unit(), Some(unit.clone()));
+        std::fs::remove_file(&unit).ok();
+        crate::test_env::restore("HOME", prior_home);
+    }
+
+    #[test]
+    fn probe_lists_event_nodes_in_sorted_order() {
+        let dir = scratch("doctor-probe-sort");
+        for name in ["event10", "event2", "not-event", "event1"] {
+            std::fs::write(dir.join(name), b"fake").unwrap();
+        }
+        let probes = probe_input_dir(&dir);
+        let names: Vec<String> = probes
+            .iter()
+            .map(|probe| {
+                probe
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(names, vec!["event1", "event10", "event2"]);
+        assert!(probes.iter().all(|probe| !probe.readable_keyboard));
+    }
+
+    #[test]
+    fn unreadable_device_is_not_a_keyboard() {
+        assert!(!is_readable_keyboard(Path::new(
+            "/nonexistent-dir-for-tests/event0"
+        )));
+    }
+
+    #[test]
+    fn exit_code_maps_failure_to_one() {
+        assert_eq!(exit_code(false), 0);
+        assert_eq!(exit_code(true), 1);
+    }
+
+    #[test]
+    fn run_without_niri_reports_every_section() {
+        let _env = crate::test_env::lock();
+        let prior_socket = std::env::var_os("NIRI_SOCKET");
+        let prior_home = std::env::var_os("HOME");
+        let dir = scratch("doctor-run-smoke");
+        unsafe {
+            std::env::remove_var("NIRI_SOCKET");
+            std::env::set_var("HOME", dir.join("home-for-run"));
+        }
+        let code = run();
+        assert!(code == 0 || code == 1);
+        crate::test_env::restore("NIRI_SOCKET", prior_socket);
+        crate::test_env::restore("HOME", prior_home);
+    }
+
+    #[test]
+    fn run_lists_unreadable_event_nodes_with_a_hint() {
+        let dir = scratch("doctor-run-nodes");
+        std::fs::write(dir.join("event0"), b"not-an-evdev-device").unwrap();
+        std::fs::write(dir.join("event1"), b"not-an-evdev-device").unwrap();
+        let code = run_in(&dir);
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn run_reports_healthy_service_and_layouts() {
+        use std::io::{BufRead, Write};
+        use std::os::unix::net::UnixListener;
+
+        let _env = crate::test_env::lock();
+        let prior_socket = std::env::var_os("NIRI_SOCKET");
+        let prior_home = std::env::var_os("HOME");
+        let prior_xdg = std::env::var_os("XDG_CONFIG_HOME");
+
+        let dir = scratch("doctor-run-healthy");
+        let home = dir.join("home");
+        unsafe {
+            std::env::set_var("HOME", &home);
+            std::env::remove_var("XDG_CONFIG_HOME");
+        }
+        let exe = dir.join("niri-punto");
+        std::fs::write(&exe, b"fake").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&exe).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&exe, permissions).unwrap();
+        }
+        let unit = unit_path().unwrap();
+        std::fs::create_dir_all(unit.parent().unwrap()).unwrap();
+        std::fs::write(&unit, format!("[Service]\nExecStart={}\n", exe.display())).unwrap();
+
+        let socket_path = dir.join("fake-niri.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let Ok(stream) = stream else { break };
+                std::thread::spawn(move || {
+                    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                    let mut writer = stream;
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_err() {
+                        return;
+                    }
+                    let reply = if line.contains("EventStream") {
+                        "{\"Ok\":\"Handled\"}".to_string()
+                    } else {
+                        "{\"Ok\":{\"KeyboardLayouts\":{\"names\":[\"us\",\"ru\"],\"current_idx\":0}}}"
+                            .to_string()
+                    };
+                    let _ = writer.write_all(reply.as_bytes());
+                    let _ = writer.write_all(b"\n");
+                });
+            }
+        });
+        unsafe {
+            std::env::set_var("NIRI_SOCKET", &socket_path);
+        }
+        let code = run_in(&dir);
+        assert_eq!(code, 1);
+        drop(server);
+        crate::test_env::restore("NIRI_SOCKET", prior_socket);
+        crate::test_env::restore("HOME", prior_home);
+        crate::test_env::restore("XDG_CONFIG_HOME", prior_xdg);
     }
 }
