@@ -1,21 +1,25 @@
-# niri-punto
+<h1 align="center">
+  <img alt="niri-punto" src="assets/niri-punto.png">
+</h1>
+
+<p align="center">
+    Keyboard layout corrector for the <a href="https://github.com/niri-wm/niri">niri</a> Wayland compositor.
+</p>
 
 <p align="center">
     <a href="https://github.com/qam1s/niri-punto/blob/main/LICENSE"><img alt="GitHub License" src="https://img.shields.io/github/license/qam1s/niri-punto?color=blue"></a>
     <a href="https://github.com/qam1s/niri-punto/actions/workflows/build.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/qam1s/niri-punto/build.yml?branch=main&logo=none"></a>
+    <a href="https://crates.io/crates/niri-punto"><img alt="Crates.io Downloads" src="https://img.shields.io/crates/d/niri-punto?color=red"></a>
     <a href="https://github.com/qam1s/niri-punto/actions/workflows/coverage.yml"><img alt="Coverage" src="https://raw.githubusercontent.com/qam1s/niri-punto/gh-badges/badge.svg"></a>
 </p>
 
-Keyboard layout corrector for the [niri](https://github.com/niri-wm/niri)
-Wayland compositor.
-
 ## How it works
 
-The daemon reads key presses, remembers them as scancodes, and on your trigger
-erases the typed text, switches the layout by index over niri IPC, and replays
-the same scancodes, they render in the new layout. Repeating the gesture
-undoes the conversion. It never grabs the keyboard: if the daemon dies, your
-keyboard keeps working.
+The daemon reads key presses and stores them as scancodes. On your trigger
+it erases the typed text. Then it switches the layout by index over niri IPC
+and replays the same scancodes. They render in the new layout. Repeat the
+gesture to undo the conversion. It never grabs the keyboard: if the daemon
+dies, your keyboard keeps working.
 
 ## Install
 
@@ -35,11 +39,11 @@ Or in your Nix flake:
 
 ## Usage
 
-| Gesture        | Action | Description                                                  |
-| -------------- | ------ | ------------------------------------------------------------ |
-| Mod            | word   | Convert word or switch layout when empty (incl. after space) |
-| Double Shift   | phrase | Convert phrase                                               |
-| Repeat gesture | undo   | Undo previous conversion                                     |
+| Gesture        | Action                                                  |
+| -------------- | ------------------------------------------------------- |
+| Mod            | Convert word or switch layout when empty (incl. after space) |
+| Double Shift   | Convert phrase                                          |
+| Repeat gesture | Undo previous conversion                                |
 
 ## License
 
