@@ -1,6 +1,7 @@
 use crate::ipc::IpcClient;
 use crate::setup::RULE_FILE_NAME;
 use crate::setup::SERVICE_FILE_NAME;
+use niri_ipc::KeyboardLayouts;
 use std::fmt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -217,6 +218,15 @@ fn is_readable_keyboard(path: &Path) -> bool {
     device.supported_events().contains(evdev::EventType::KEY)
 }
 
+pub fn layouts_hint(layouts: &KeyboardLayouts) -> Option<String> {
+    (layouts.names.len() > 2).then(|| {
+        format!(
+            "hint: {} layouts configured; conversion works only between the first two, others are skipped",
+            layouts.names.len()
+        )
+    })
+}
+
 fn line(key: &str, value: impl fmt::Display) {
     println!("{key}: {value}");
 }
@@ -309,6 +319,9 @@ pub fn run_in(input_dir: &Path) -> i32 {
                             layouts.current_idx,
                         ),
                     );
+                    if let Some(hint) = layouts_hint(&layouts) {
+                        println!("  {hint}");
+                    }
                     Some(layouts)
                 }
                 Err(error) => {
@@ -348,6 +361,26 @@ mod tests {
             RuleCheck::Ok
         );
         assert_eq!(assess_rule(Some("# empty rule\n")), RuleCheck::NoUaccess);
+    }
+
+    #[test]
+    fn layouts_hint_is_quiet_for_a_pair() {
+        let layouts = KeyboardLayouts {
+            names: vec!["us".to_string(), "ru".to_string()],
+            current_idx: 0,
+        };
+        assert_eq!(layouts_hint(&layouts), None);
+    }
+
+    #[test]
+    fn layouts_hint_warns_beyond_a_pair() {
+        let layouts = KeyboardLayouts {
+            names: vec!["us".to_string(), "ru".to_string(), "de".to_string()],
+            current_idx: 2,
+        };
+        let hint = layouts_hint(&layouts).unwrap();
+        assert!(hint.contains("3 layouts"), "{hint}");
+        assert!(hint.contains("first two"), "{hint}");
     }
 
     #[test]
