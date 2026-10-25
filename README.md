@@ -10,7 +10,7 @@
     <a href="https://github.com/qam1s/niri-punto/blob/main/LICENSE"><img alt="GitHub License" src="https://img.shields.io/github/license/qam1s/niri-punto?color=blue"></a>
     <a href="https://github.com/qam1s/niri-punto/actions/workflows/build.yml"><img alt="Build" src="https://img.shields.io/github/actions/workflow/status/qam1s/niri-punto/build.yml?branch=main&logo=none"></a>
     <a href="https://crates.io/crates/niri-punto"><img alt="Crates.io Downloads" src="https://img.shields.io/crates/d/niri-punto?color=red"></a>
-    <a href="https://github.com/qam1s/niri-punto/actions/workflows/coverage.yml"><img alt="Coverage" src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/qam1s/niri-punto/gh-badges/coverage.json"></a>
+    <a href="https://github.com/qam1s/niri-punto/actions/workflows/coverage.yml"><img alt="Coverage" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fqam1s%2Fniri-punto%2Fgh-badges%2Fcoverage.json"></a>
 </p>
 
 ## How it works
