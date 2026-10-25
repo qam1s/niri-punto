@@ -4,7 +4,7 @@ on:
     branches: ["main"]
   pull_request:
 permissions:
-  contents: write # needed to publish badge.svg to the gh-badges branch
+  contents: write # needed to publish coverage.json to the gh-badges branch
 jobs:
   coverage:
     runs-on: ubuntu-latest
@@ -14,28 +14,26 @@ jobs:
       - uses: taiki-e/install-action@cargo-tarpaulin
       - name: Run tarpaulin
         run: cargo tarpaulin --locked --workspace --out Xml --output-dir /tmp/coverage | tee /tmp/coverage.txt
-      - name: Build badge.svg from cobertura.xml
+      - name: Build coverage.json from cobertura.xml
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
-          VALUE_COLOR=$(python3 - <<'EOF'
+          python3 - <<'EOF'
+          import json
           import xml.etree.ElementTree as ET
           tree = ET.parse("/tmp/coverage/cobertura.xml")
           pct = float(tree.getroot().attrib["line-rate"]) * 100.0
           value = f"{pct:.1f}".rstrip("0").rstrip(".") + "%"
           color = (
-              "#4c1" if pct >= 90
-              else "#97ca00" if pct >= 80
-              else "#dfb317" if pct >= 70
-              else "#fe7d37" if pct >= 60
-              else "#e05d44"
+              "brightgreen" if pct >= 90
+              else "yellowgreen" if pct >= 80
+              else "yellow" if pct >= 70
+              else "orange" if pct >= 60
+              else "red"
           )
-          print(f"{value} {color}")
+          with open("coverage.json", "w") as f:
+              json.dump({"schemaVersion": 1, "label": "coverage", "message": value, "color": color}, f)
+          print(f"coverage: {value}")
           EOF
-          )
-          VALUE=${VALUE_COLOR% *}
-          COLOR=${VALUE_COLOR#* }
-          npx -y -p badge-maker@6 badge coverage "$VALUE" "$COLOR" @flat > badge.svg
-          echo "coverage: $VALUE"
       - name: Publish badge to gh-badges branch
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         env:
@@ -53,14 +51,15 @@ jobs:
             git -C /tmp/gh-badges init -b "$BRANCH"
             git -C /tmp/gh-badges remote add origin "$REPO"
           fi
-          cp badge.svg /tmp/gh-badges/badge.svg
+          cp coverage.json /tmp/gh-badges/coverage.json
           cd /tmp/gh-badges
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add badge.svg
+          git add coverage.json
+          if git ls-files --error-unmatch badge.svg >/dev/null 2>&1; then git rm -q badge.svg; fi
           if git diff --cached --quiet; then
-            echo "badge unchanged"
+            echo "coverage unchanged"
           else
-            git commit -m "docs: update coverage badge"
+            git commit -m "docs: update coverage data"
             git push origin "$BRANCH"
           fi
