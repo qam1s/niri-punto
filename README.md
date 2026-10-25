@@ -3,7 +3,7 @@
 </h1>
 
 <p align="center">
-    Keyboard layout corrector for the <a href="https://github.com/niri-wm/niri">niri</a> Wayland compositor.
+    Keyboard layout corrector for the <a href="https://github.com/niri-wm/niri">niri</a> Wayland compositor
 </p>
 
 <p align="center">
@@ -15,11 +15,7 @@
 
 ## How it works
 
-The daemon reads key presses and stores them as scancodes. On your trigger
-it erases the typed text. Then it switches the layout by index over niri IPC
-and replays the same scancodes. They render in the new layout. Repeat the
-gesture to undo the conversion. It never grabs the keyboard: if the daemon
-dies, your keyboard keeps working.
+The daemon reads key presses and stores them as scancodes. On your trigger it erases the typed text, switches the layout by index over niri IPC and replays the same scancodes in the new layout. Repeat the gesture to undo the conversion. It never grabs the keyboard: if the daemon dies, your keyboard keeps working.
 
 ## Install
 
@@ -39,11 +35,11 @@ Or in your Nix flake:
 
 ## Usage
 
-| Gesture        | Action                                                  |
-| -------------- | ------------------------------------------------------- |
+| Gesture        | Action                                                       |
+| -------------- | ------------------------------------------------------------ |
 | Mod            | Convert word or switch layout when empty (incl. after space) |
-| Double Shift   | Convert phrase                                          |
-| Repeat gesture | Undo previous conversion                                |
+| Double Shift   | Convert phrase                                               |
+| Repeat gesture | Undo previous conversion                                     |
 
 ## License
 
